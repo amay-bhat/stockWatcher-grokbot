@@ -339,7 +339,8 @@ class TestCliBotFlag(unittest.TestCase):
             bot.assert_called_once()
 
     def test_cli_rejects_check_and_bot_together(self) -> None:
-        with self.assertRaises(SystemExit):
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr), self.assertRaises(SystemExit):
             cli_main(["--check", "--bot"])
 
 
