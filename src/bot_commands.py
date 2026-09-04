@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from src.alerts import VALID_MODES
+from src.alerts import VALID_MODES, TickerConfig
 from src.bot import get_updates, is_allowed_chat, require_telegram_env, send_message
 from src.check_once import run_check
 from src.store import Store
@@ -21,14 +21,14 @@ if TYPE_CHECKING:
 
 HELP_TEXT = """Watchlist commands:
 /list — tickers, thresholds, modes
-/add TICKER [pct] — add (validates via Finnhub)
+/add TICKER [pct|$5] — add (validates via Finnhub)
 /remove TICKER
-/set TICKER pct
+/set TICKER 5%|$5 — percent or dollar drop from prev close
 /mode TICKER once|legs|mute
 /mute TICKER
 /status — price and % change
 /check — poll now
-/default pct — global default threshold
+/default pct — global default percent threshold
 /help"""
 
 
@@ -36,6 +36,12 @@ HELP_TEXT = """Watchlist commands:
 class ParsedCommand:
     name: str
     args: list[str]
+
+
+@dataclass(frozen=True)
+class ParsedThreshold:
+    unit: str
+    value: float
 
 
 @dataclass
@@ -169,19 +175,19 @@ def cmd_list(_args: Sequence[str], deps: BotDeps) -> str:
     rows = deps.store.get_watchlist()
     if not rows:
         return "watchlist is empty"
-    return "\n".join(_format_ticker(row.symbol, row.threshold_pct, row.mode) for row in rows)
+    return "\n".join(_format_ticker(row) for row in rows)
 
 
 def cmd_add(args: Sequence[str], deps: BotDeps) -> str:
     if not args:
-        return "usage: /add TICKER [pct]"
+        return "usage: /add TICKER [pct|$5]"
     symbol = _normalize_ticker(args[0])
     if not symbol:
-        return "usage: /add TICKER [pct]"
-    threshold: float | None = None
+        return "usage: /add TICKER [pct|$5]"
+    parsed: ParsedThreshold | None = None
     if len(args) >= 2:
         try:
-            threshold = _parse_pct(args[1])
+            parsed = parse_threshold(args[1])
         except ValueError as exc:
             return str(exc)
 
@@ -190,10 +196,23 @@ def cmd_add(args: Sequence[str], deps: BotDeps) -> str:
 
     existing = deps.store.get_ticker(symbol)
     mode = existing.mode if existing is not None else "once"
-    if threshold is None and existing is not None:
-        threshold = existing.threshold_pct
-    config = deps.store.upsert_ticker(symbol, threshold_pct=threshold, mode=mode)
-    return _format_ticker(config.symbol, config.threshold_pct, config.mode)
+    if parsed is None:
+        config = deps.store.upsert_ticker(symbol, mode=mode)
+    elif parsed.unit == "usd":
+        config = deps.store.upsert_ticker(
+            symbol,
+            mode=mode,
+            threshold_unit="usd",
+            threshold_usd=parsed.value,
+        )
+    else:
+        config = deps.store.upsert_ticker(
+            symbol,
+            threshold_pct=parsed.value,
+            mode=mode,
+            threshold_unit="pct",
+        )
+    return _format_ticker(config)
 
 
 def cmd_remove(args: Sequence[str], deps: BotDeps) -> str:
@@ -210,21 +229,38 @@ def cmd_remove(args: Sequence[str], deps: BotDeps) -> str:
 
 def cmd_set(args: Sequence[str], deps: BotDeps) -> str:
     if len(args) < 2:
-        return "usage: /set TICKER pct"
+        return "usage: /set TICKER 5%|$5"
     symbol = _normalize_ticker(args[0])
     if not symbol:
-        return "usage: /set TICKER pct"
-    try:
-        threshold = _parse_pct(args[1])
-    except ValueError as exc:
-        return str(exc)
+        return "usage: /set TICKER 5%|$5"
     existing = deps.store.get_ticker(symbol)
     if existing is None:
         return f"{symbol} is not on the watchlist"
-    config = deps.store.upsert_ticker(
-        symbol, threshold_pct=threshold, mode=existing.mode
-    )
-    return _format_ticker(config.symbol, config.threshold_pct, config.mode)
+    raw = args[1].strip()
+    if raw.lower() == "pct":
+        config = deps.store.upsert_ticker(
+            symbol, mode=existing.mode, threshold_unit="pct"
+        )
+        return _format_ticker(config)
+    try:
+        parsed = parse_threshold(raw)
+    except ValueError as exc:
+        return str(exc)
+    if parsed.unit == "usd":
+        config = deps.store.upsert_ticker(
+            symbol,
+            mode=existing.mode,
+            threshold_unit="usd",
+            threshold_usd=parsed.value,
+        )
+    else:
+        config = deps.store.upsert_ticker(
+            symbol,
+            threshold_pct=parsed.value,
+            mode=existing.mode,
+            threshold_unit="pct",
+        )
+    return _format_ticker(config)
 
 
 def cmd_mode(args: Sequence[str], deps: BotDeps) -> str:
@@ -240,9 +276,13 @@ def cmd_mode(args: Sequence[str], deps: BotDeps) -> str:
     if existing is None:
         return f"{symbol} is not on the watchlist"
     config = deps.store.upsert_ticker(
-        symbol, threshold_pct=existing.threshold_pct, mode=mode
+        symbol,
+        threshold_pct=existing.threshold_pct,
+        mode=mode,
+        threshold_unit=existing.threshold_unit,
+        threshold_usd=existing.threshold_usd,
     )
-    return _format_ticker(config.symbol, config.threshold_pct, config.mode)
+    return _format_ticker(config)
 
 
 def cmd_mute(args: Sequence[str], deps: BotDeps) -> str:
@@ -298,14 +338,35 @@ def _normalize_ticker(raw: str) -> str:
     return (raw or "").strip().upper()
 
 
+def parse_threshold(raw: str) -> ParsedThreshold:
+    """Parse `5`, `5%` (pct) or `$5`, `5usd` (usd). Bare numbers stay pct."""
+    text = (raw or "").strip().lower().replace(" ", "")
+    if not text:
+        raise ValueError("pct must be a positive number")
+    if text.startswith("$"):
+        return ParsedThreshold("usd", _parse_positive(text[1:], "usd"))
+    if text.endswith("usd"):
+        return ParsedThreshold("usd", _parse_positive(text[:-3], "usd"))
+    if text.endswith("%"):
+        return ParsedThreshold("pct", _parse_positive(text[:-1], "pct"))
+    return ParsedThreshold("pct", _parse_positive(text, "pct"))
+
+
 def _parse_pct(raw: str) -> float:
-    text = (raw or "").strip().rstrip("%")
+    parsed = parse_threshold(raw)
+    if parsed.unit != "pct":
+        raise ValueError("pct must be a positive number")
+    return parsed.value
+
+
+def _parse_positive(raw: str, kind: str) -> float:
+    text = (raw or "").strip()
     try:
         value = float(text)
     except (TypeError, ValueError) as exc:
-        raise ValueError("pct must be a positive number") from exc
+        raise ValueError(f"{kind} must be a positive number") from exc
     if value <= 0 or not math.isfinite(value):
-        raise ValueError("pct must be a positive number")
+        raise ValueError(f"{kind} must be a positive number")
     return value
 
 
@@ -333,8 +394,12 @@ def _format_pct(value: float) -> str:
     return text
 
 
-def _format_ticker(symbol: str, threshold_pct: float, mode: str) -> str:
-    return f"{symbol}  {_format_pct(threshold_pct)}%  {mode}"
+def _format_ticker(config: TickerConfig) -> str:
+    if config.threshold_unit == "usd":
+        usd = config.threshold_usd
+        amount = _format_pct(usd) if usd is not None else "?"
+        return f"{config.symbol}  ${amount}  {config.mode}"
+    return f"{config.symbol}  {_format_pct(config.threshold_pct)}%  {config.mode}"
 
 
 def _format_status_line(ticker: str, quote: dict[str, float | None] | None) -> str:

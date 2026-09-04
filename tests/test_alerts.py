@@ -10,6 +10,7 @@ from src.alerts import (
     Decision,
     Quote,
     TickerConfig,
+    dollar_drop,
     evaluate_alert,
     fresh_state,
     pct_change,
@@ -24,8 +25,16 @@ def _cfg(
     symbol: str = "NVDA",
     threshold_pct: float = 3.0,
     mode: str = "once",
+    threshold_unit: str = "pct",
+    threshold_usd: float | None = None,
 ) -> TickerConfig:
-    return TickerConfig(symbol=symbol, threshold_pct=threshold_pct, mode=mode)
+    return TickerConfig(
+        symbol=symbol,
+        threshold_pct=threshold_pct,
+        mode=mode,
+        threshold_unit=threshold_unit,
+        threshold_usd=threshold_usd,
+    )
 
 
 def _quote(price: float | None, prev_close: float | None = PREV) -> Quote:
@@ -37,13 +46,20 @@ def _eval(
     *,
     mode: str = "once",
     threshold_pct: float = 3.0,
+    threshold_unit: str = "pct",
+    threshold_usd: float | None = None,
     state: AlertState | None = None,
     day_key: str = DAY,
     prev_close: float | None = PREV,
 ) -> Decision:
     return evaluate_alert(
         _quote(price, prev_close),
-        _cfg(threshold_pct=threshold_pct, mode=mode),
+        _cfg(
+            threshold_pct=threshold_pct,
+            mode=mode,
+            threshold_unit=threshold_unit,
+            threshold_usd=threshold_usd,
+        ),
         state,
         day_key,
     )
@@ -233,6 +249,184 @@ class TestHelpers(unittest.TestCase):
     def test_non_finite_threshold_does_not_alert(self) -> None:
         decision = _eval(90.0, threshold_pct=math.nan)
         self.assertFalse(decision.should_alert)
+
+    def test_dollar_drop_formula(self) -> None:
+        self.assertAlmostEqual(dollar_drop(_quote(97.0, 100.0)), 3.0)
+        self.assertAlmostEqual(dollar_drop(_quote(105.0, 100.0)), -5.0)
+        self.assertIsNone(dollar_drop(_quote(None, 100.0)))
+        self.assertIsNone(dollar_drop(_quote(90.0, 0.0)))
+
+
+class TestUsdOnceMode(unittest.TestCase):
+    def test_first_fire_when_dollar_threshold_crossed(self) -> None:
+        decision = _eval(95.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(decision.should_alert)
+        self.assertIsNone(decision.leg)
+        self.assertTrue(decision.new_state.fired)
+        self.assertAlmostEqual(decision.dollar_drop, 5.0)
+        self.assertAlmostEqual(decision.pct_change, -0.05)
+
+    def test_no_refire_same_day_even_if_it_falls_further(self) -> None:
+        first = _eval(95.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        second = _eval(90.0, mode="once", threshold_unit="usd", threshold_usd=5.0, state=first.new_state)
+        self.assertTrue(first.should_alert)
+        self.assertFalse(second.should_alert)
+        self.assertTrue(second.new_state.fired)
+
+    def test_no_alert_when_drop_is_short(self) -> None:
+        decision = _eval(96.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertFalse(decision.should_alert)
+        self.assertFalse(decision.new_state.fired)
+        self.assertAlmostEqual(decision.dollar_drop, 4.0)
+
+    def test_gap_down_alerts_once(self) -> None:
+        decision = _eval(85.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(decision.should_alert)
+        self.assertTrue(decision.new_state.fired)
+        again = _eval(80.0, mode="once", threshold_unit="usd", threshold_usd=5.0, state=decision.new_state)
+        self.assertFalse(again.should_alert)
+
+    def test_new_day_resets_once_memory(self) -> None:
+        first = _eval(95.0, mode="once", threshold_unit="usd", threshold_usd=5.0, day_key=DAY)
+        nxt = _eval(
+            95.0,
+            mode="once",
+            threshold_unit="usd",
+            threshold_usd=5.0,
+            state=first.new_state,
+            day_key=NEXT_DAY,
+        )
+        self.assertTrue(nxt.should_alert)
+        self.assertEqual(nxt.new_state.day_key, NEXT_DAY)
+
+    def test_pct_config_does_not_use_usd_threshold(self) -> None:
+        # -2% is $2; usd $1 would fire, but unit is pct at 3%.
+        decision = _eval(
+            98.0,
+            mode="once",
+            threshold_pct=3.0,
+            threshold_unit="pct",
+            threshold_usd=1.0,
+        )
+        self.assertFalse(decision.should_alert)
+
+
+class TestUsdLegsMode(unittest.TestCase):
+    def test_first_leg_at_one_threshold(self) -> None:
+        decision = _eval(95.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(decision.should_alert)
+        self.assertEqual(decision.leg, 1)
+        self.assertEqual(decision.new_state.last_leg, 1)
+
+    def test_second_leg_on_additional_full_step(self) -> None:
+        first = _eval(95.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        second = _eval(90.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=first.new_state)
+        self.assertTrue(second.should_alert)
+        self.assertEqual(second.leg, 2)
+        self.assertEqual(second.new_state.last_leg, 2)
+
+    def test_third_leg(self) -> None:
+        state = _eval(90.0, mode="legs", threshold_unit="usd", threshold_usd=5.0).new_state
+        third = _eval(85.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=state)
+        self.assertTrue(third.should_alert)
+        self.assertEqual(third.leg, 3)
+
+    def test_no_refire_at_same_leg(self) -> None:
+        first = _eval(95.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        same = _eval(93.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=first.new_state)
+        self.assertFalse(same.should_alert)
+        self.assertEqual(same.new_state.last_leg, 1)
+
+    def test_gap_down_fires_deepest_leg_once(self) -> None:
+        decision = _eval(85.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(decision.should_alert)
+        self.assertEqual(decision.leg, 3)
+        again = _eval(85.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=decision.new_state)
+        self.assertFalse(again.should_alert)
+
+    def test_bounce_does_not_alert_or_rewind_legs(self) -> None:
+        down = _eval(90.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        bounce = _eval(98.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=down.new_state)
+        self.assertFalse(bounce.should_alert)
+        self.assertEqual(bounce.new_state.last_leg, 2)
+        still = _eval(90.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=bounce.new_state)
+        self.assertFalse(still.should_alert)
+
+    def test_further_drop_after_bounce_can_fire_next_leg(self) -> None:
+        down = _eval(90.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        bounce = _eval(98.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=down.new_state)
+        deeper = _eval(85.0, mode="legs", threshold_unit="usd", threshold_usd=5.0, state=bounce.new_state)
+        self.assertTrue(deeper.should_alert)
+        self.assertEqual(deeper.leg, 3)
+
+
+class TestUsdMuteMode(unittest.TestCase):
+    def test_mute_never_fires(self) -> None:
+        decision = _eval(50.0, mode="mute", threshold_unit="usd", threshold_usd=5.0)
+        self.assertFalse(decision.should_alert)
+        self.assertIsNone(decision.leg)
+        self.assertFalse(decision.new_state.fired)
+        self.assertEqual(decision.new_state.last_leg, 0)
+        self.assertAlmostEqual(decision.dollar_drop, 50.0)
+
+
+class TestUsdInvalidAndBoundary(unittest.TestCase):
+    def test_exact_dollar_threshold_fires(self) -> None:
+        decision = _eval(95.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(decision.should_alert)
+        legs = _eval(95.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        self.assertTrue(legs.should_alert)
+        self.assertEqual(legs.leg, 1)
+
+    def test_just_inside_dollar_threshold_does_not_fire(self) -> None:
+        decision = _eval(95.01, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertFalse(decision.should_alert)
+        self.assertLess(decision.dollar_drop, 5.0)
+
+    def test_up_day_never_alerts(self) -> None:
+        decision = _eval(105.0, mode="once", threshold_unit="usd", threshold_usd=5.0)
+        self.assertFalse(decision.should_alert)
+        self.assertAlmostEqual(decision.dollar_drop, -5.0)
+        legs = _eval(105.0, mode="legs", threshold_unit="usd", threshold_usd=5.0)
+        self.assertFalse(legs.should_alert)
+        self.assertEqual(legs.new_state.last_leg, 0)
+
+    def test_missing_usd_threshold_does_not_alert(self) -> None:
+        prior = AlertState(day_key=DAY, fired=True, last_leg=2)
+        decision = _eval(90.0, mode="once", threshold_unit="usd", threshold_usd=None, state=prior)
+        self.assertFalse(decision.should_alert)
+        self.assertEqual(decision.new_state, prior)
+
+    def test_zero_usd_threshold_does_not_alert(self) -> None:
+        decision = _eval(90.0, mode="once", threshold_unit="usd", threshold_usd=0.0)
+        self.assertFalse(decision.should_alert)
+
+    def test_negative_usd_threshold_does_not_alert(self) -> None:
+        decision = _eval(90.0, mode="once", threshold_unit="usd", threshold_usd=-5.0)
+        self.assertFalse(decision.should_alert)
+
+    def test_nan_usd_threshold_does_not_alert(self) -> None:
+        decision = _eval(90.0, mode="once", threshold_unit="usd", threshold_usd=math.nan)
+        self.assertFalse(decision.should_alert)
+
+    def test_invalid_quote_leaves_usd_state_unchanged(self) -> None:
+        prior = AlertState(day_key=DAY, fired=True, last_leg=2)
+        decision = _eval(
+            None, mode="once", threshold_unit="usd", threshold_usd=5.0, state=prior
+        )
+        self.assertFalse(decision.should_alert)
+        self.assertIsNone(decision.dollar_drop)
+        self.assertEqual(decision.new_state, prior)
+
+    def test_unknown_unit_falls_back_to_pct(self) -> None:
+        decision = _eval(
+            97.0,
+            mode="once",
+            threshold_pct=3.0,
+            threshold_unit="nope",
+            threshold_usd=50.0,
+        )
+        self.assertTrue(decision.should_alert)
 
 
 if __name__ == "__main__":

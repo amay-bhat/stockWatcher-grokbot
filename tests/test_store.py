@@ -54,6 +54,8 @@ class TestStoreSeed(StoreTestCase):
         for row in watchlist:
             self.assertEqual(row.mode, "once")
             self.assertEqual(row.threshold_pct, DEFAULT_THRESHOLD_PCT)
+            self.assertEqual(row.threshold_unit, "pct")
+            self.assertIsNone(row.threshold_usd)
 
     def test_seed_uses_env_threshold(self) -> None:
         with patch.dict(os.environ, {"DEFAULT_THRESHOLD_PCT": "2.5"}):
@@ -111,6 +113,8 @@ class TestStoreWatchlist(StoreTestCase):
         row = store.upsert_ticker("META")
         self.assertEqual(row.threshold_pct, 4.0)
         self.assertEqual(row.mode, "once")
+        self.assertEqual(row.threshold_unit, "pct")
+        self.assertIsNone(row.threshold_usd)
 
     def test_unknown_mode_falls_back_to_once(self) -> None:
         row = self._store().upsert_ticker("AMD", threshold_pct=3.0, mode="nope")
@@ -131,6 +135,75 @@ class TestStoreWatchlist(StoreTestCase):
     def test_get_set_default_threshold_survives_restart(self) -> None:
         self._store().set_default_threshold_pct(2.0)
         self.assertEqual(Store(self.path).get_default_threshold_pct(), 2.0)
+
+    def test_upsert_usd_round_trip(self) -> None:
+        store = self._store()
+        created = store.upsert_ticker(
+            "NVDA", threshold_unit="usd", threshold_usd=5.0, mode="legs"
+        )
+        self.assertEqual(created.threshold_unit, "usd")
+        self.assertEqual(created.threshold_usd, 5.0)
+        self.assertEqual(created.mode, "legs")
+        self.assertEqual(created.threshold_pct, DEFAULT_THRESHOLD_PCT)
+
+        loaded = Store(self.path).get_ticker("NVDA")
+        self.assertEqual(loaded, created)
+
+        switched = store.upsert_ticker("NVDA", threshold_pct=2.5, threshold_unit="pct")
+        self.assertEqual(switched.threshold_unit, "pct")
+        self.assertEqual(switched.threshold_pct, 2.5)
+        self.assertEqual(switched.mode, "legs")
+        self.assertEqual(switched.threshold_usd, 5.0)
+
+    def test_mode_update_preserves_usd_unit(self) -> None:
+        store = self._store()
+        store.upsert_ticker("NVDA", threshold_unit="usd", threshold_usd=5.0, mode="once")
+        updated = store.upsert_ticker("NVDA", mode="mute")
+        self.assertEqual(updated.threshold_unit, "usd")
+        self.assertEqual(updated.threshold_usd, 5.0)
+        self.assertEqual(updated.mode, "mute")
+
+    def test_usd_upsert_requires_positive_amount(self) -> None:
+        store = self._store()
+        with self.assertRaises(ValueError):
+            store.upsert_ticker("META", threshold_unit="usd")
+        with self.assertRaises(ValueError):
+            store.upsert_ticker("META", threshold_unit="usd", threshold_usd=0)
+
+    def test_migrates_legacy_watchlist_without_unit_columns(self) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE watchlist (
+                    symbol TEXT PRIMARY KEY,
+                    threshold_pct REAL NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'once'
+                );
+                CREATE TABLE alert_state (
+                    symbol TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    fired INTEGER NOT NULL DEFAULT 0,
+                    last_leg INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (symbol, day_key)
+                );
+                INSERT INTO settings (key, value) VALUES ('seeded', '1');
+                INSERT INTO settings (key, value)
+                    VALUES ('default_threshold_pct', '3.0');
+                INSERT INTO watchlist (symbol, threshold_pct, mode)
+                    VALUES ('NVDA', 3.0, 'once');
+                """
+            )
+        store = Store(self.path)
+        row = store.get_ticker("NVDA")
+        assert row is not None
+        self.assertEqual(row.threshold_unit, "pct")
+        self.assertIsNone(row.threshold_usd)
+        self.assertEqual(row.threshold_pct, 3.0)
+        self.assertEqual([item.symbol for item in store.get_watchlist()], ["NVDA"])
 
 
 class TestStoreAlertState(StoreTestCase):

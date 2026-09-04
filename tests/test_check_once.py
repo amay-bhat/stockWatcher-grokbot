@@ -103,6 +103,31 @@ class TestEvaluateWatchlist(unittest.TestCase):
         fired = evaluate_watchlist(quotes, configs, day_key="2026-09-04", states={})
         self.assertEqual([row.symbol for row in fired], ["AMD"])
 
+    def test_usd_threshold_fires_on_dollar_drop(self) -> None:
+        quotes = {
+            "NVDA": Quote(price=118.40, prev_close=123.60),  # $5.20 drop
+            "AMD": Quote(price=97.50, prev_close=100.0),  # $2.50 / -2.5%
+        }
+        configs = [
+            TickerConfig(
+                symbol="NVDA",
+                threshold_pct=3.0,
+                mode="once",
+                threshold_unit="usd",
+                threshold_usd=5.0,
+            ),
+            TickerConfig(
+                symbol="AMD",
+                threshold_pct=3.0,
+                mode="once",
+                threshold_unit="usd",
+                threshold_usd=5.0,
+            ),
+        ]
+        fired = evaluate_watchlist(quotes, configs, day_key="2026-09-04", states={})
+        self.assertEqual([row.symbol for row in fired], ["NVDA"])
+        self.assertEqual(fired[0].threshold_unit, "usd")
+
 
 class TestQuotesFromRaw(unittest.TestCase):
     def test_missing_ticker_becomes_empty_quote(self) -> None:
@@ -265,6 +290,24 @@ class TestRunCheck(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(sent, [])
+
+    def test_usd_store_config_sends_dollar_drop_message(self) -> None:
+        store = self._store()
+        store.upsert_ticker("NVDA", threshold_unit="usd", threshold_usd=5.0)
+        sent: list[str] = []
+        with patch("sys.stdout", io.StringIO()):
+            code = run_check(
+                provider=FakeProvider(
+                    self._quotes(NVDA={"price": 118.40, "prev_close": 123.60})
+                ),
+                sender=sent.append,
+                now=datetime(2026, 9, 4, 10, 45, tzinfo=ET),
+                store=store,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("−$5.20", sent[0])
+        self.assertNotIn("−4.2%", sent[0])
 
     def test_failed_send_does_not_persist_fired_state(self) -> None:
         def boom(_text: str) -> None:

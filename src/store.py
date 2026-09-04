@@ -15,7 +15,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from src.alerts import VALID_MODES, AlertMode, AlertState, TickerConfig
+from src.alerts import VALID_MODES, VALID_UNITS, AlertMode, AlertState, TickerConfig, ThresholdUnit
 
 DEFAULT_THRESHOLD_PCT = 3.0
 DEFAULT_DATABASE_PATH = "./data/watchlist.db"
@@ -23,6 +23,7 @@ SEED_TICKERS = ("NVDA", "AMD", "AAPL", "MSFT", "GOOGL")
 
 _SETTING_SEEDED = "seeded"
 _SETTING_DEFAULT_THRESHOLD = "default_threshold_pct"
+_WATCHLIST_COLS = "symbol, threshold_pct, mode, threshold_unit, threshold_usd"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -33,7 +34,9 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS watchlist (
     symbol TEXT PRIMARY KEY,
     threshold_pct REAL NOT NULL,
-    mode TEXT NOT NULL DEFAULT 'once'
+    mode TEXT NOT NULL DEFAULT 'once',
+    threshold_unit TEXT NOT NULL DEFAULT 'pct',
+    threshold_usd REAL
 );
 
 CREATE TABLE IF NOT EXISTS alert_state (
@@ -78,7 +81,7 @@ class Store:
     def get_watchlist(self) -> list[TickerConfig]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT symbol, threshold_pct, mode FROM watchlist ORDER BY rowid"
+                f"SELECT {_WATCHLIST_COLS} FROM watchlist ORDER BY rowid"
             ).fetchall()
         return [_row_to_config(row) for row in rows]
 
@@ -88,7 +91,7 @@ class Store:
             return None
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT symbol, threshold_pct, mode FROM watchlist WHERE symbol = ?",
+                f"SELECT {_WATCHLIST_COLS} FROM watchlist WHERE symbol = ?",
                 (normalized,),
             ).fetchone()
         if row is None:
@@ -99,30 +102,69 @@ class Store:
         self,
         symbol: str,
         threshold_pct: float | None = None,
-        mode: str = "once",
+        mode: str | None = None,
+        threshold_unit: str | None = None,
+        threshold_usd: float | None = None,
     ) -> TickerConfig:
         normalized = _normalize_symbol(symbol)
         if not normalized:
             raise ValueError("ticker symbol is required")
-        threshold = (
-            self.get_default_threshold_pct()
-            if threshold_pct is None
-            else _require_positive_threshold(threshold_pct)
-        )
-        alert_mode = _normalize_mode(mode)
+        existing = self.get_ticker(normalized)
+        if existing is not None:
+            threshold = (
+                existing.threshold_pct
+                if threshold_pct is None
+                else _require_positive_threshold(threshold_pct)
+            )
+            alert_mode = (
+                existing.mode if mode is None else _normalize_mode(mode)
+            )
+            unit = (
+                existing.threshold_unit
+                if threshold_unit is None
+                else _normalize_unit(threshold_unit)
+            )
+            usd = (
+                existing.threshold_usd
+                if threshold_usd is None
+                else _require_positive_threshold(threshold_usd, field="threshold_usd")
+            )
+        else:
+            threshold = (
+                self.get_default_threshold_pct()
+                if threshold_pct is None
+                else _require_positive_threshold(threshold_pct)
+            )
+            alert_mode = _normalize_mode(mode or "once")
+            unit = _normalize_unit(threshold_unit or "pct")
+            usd = (
+                None
+                if threshold_usd is None
+                else _require_positive_threshold(threshold_usd, field="threshold_usd")
+            )
+        if unit == "usd" and not _is_positive(usd):
+            raise ValueError("threshold_usd must be a positive number")
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO watchlist (symbol, threshold_pct, mode)
-                VALUES (?, ?, ?)
+                INSERT INTO watchlist (
+                    symbol, threshold_pct, mode, threshold_unit, threshold_usd
+                )
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     threshold_pct = excluded.threshold_pct,
-                    mode = excluded.mode
+                    mode = excluded.mode,
+                    threshold_unit = excluded.threshold_unit,
+                    threshold_usd = excluded.threshold_usd
                 """,
-                (normalized, threshold, alert_mode),
+                (normalized, threshold, alert_mode, unit, usd),
             )
         return TickerConfig(
-            symbol=normalized, threshold_pct=threshold, mode=alert_mode
+            symbol=normalized,
+            threshold_pct=threshold,
+            mode=alert_mode,
+            threshold_unit=unit,
+            threshold_usd=usd,
         )
 
     def remove_ticker(self, symbol: str) -> bool:
@@ -235,6 +277,7 @@ class Store:
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA)
+        _migrate_watchlist(conn)
 
     def _seed_if_needed(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(
@@ -257,8 +300,10 @@ class Store:
                 continue
             conn.execute(
                 """
-                INSERT OR IGNORE INTO watchlist (symbol, threshold_pct, mode)
-                VALUES (?, ?, 'once')
+                INSERT OR IGNORE INTO watchlist (
+                    symbol, threshold_pct, mode, threshold_unit
+                )
+                VALUES (?, ?, 'once', 'pct')
                 """,
                 (normalized, threshold),
             )
@@ -279,11 +324,42 @@ def _normalize_mode(mode: str) -> AlertMode:
     return "once"
 
 
-def _require_positive_threshold(value: float) -> float:
+def _normalize_unit(unit: str) -> ThresholdUnit:
+    normalized = (unit or "pct").strip().lower()
+    if normalized in VALID_UNITS:
+        return normalized  # type: ignore[return-value]
+    return "pct"
+
+
+def _is_positive(value: float | None) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _require_positive_threshold(value: float, field: str = "threshold_pct") -> float:
     threshold = float(value)
     if threshold <= 0 or not math.isfinite(threshold):
-        raise ValueError("threshold_pct must be a positive number")
+        raise ValueError(f"{field} must be a positive number")
     return threshold
+
+
+def _migrate_watchlist(conn: sqlite3.Connection) -> None:
+    """Add unit/usd columns to DBs created before dollar thresholds existed."""
+    cols = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()
+    }
+    if not cols:
+        return
+    if "threshold_unit" not in cols:
+        conn.execute(
+            "ALTER TABLE watchlist ADD COLUMN threshold_unit TEXT NOT NULL DEFAULT 'pct'"
+        )
+    if "threshold_usd" not in cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN threshold_usd REAL")
 
 
 def _format_threshold(value: float) -> str:
@@ -291,10 +367,21 @@ def _format_threshold(value: float) -> str:
 
 
 def _row_to_config(row: sqlite3.Row) -> TickerConfig:
+    keys = set(row.keys())
+    unit = "pct"
+    if "threshold_unit" in keys and row["threshold_unit"]:
+        unit = _normalize_unit(str(row["threshold_unit"]))
+    usd = None
+    if "threshold_usd" in keys and row["threshold_usd"] is not None:
+        usd = float(row["threshold_usd"])
+        if not _is_positive(usd):
+            usd = None
     return TickerConfig(
         symbol=str(row["symbol"]),
         threshold_pct=float(row["threshold_pct"]),
         mode=_normalize_mode(str(row["mode"])),
+        threshold_unit=unit,
+        threshold_usd=usd,
     )
 
 
