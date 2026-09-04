@@ -3,32 +3,25 @@
 from __future__ import annotations
 
 from datetime import datetime
-import math
-import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from src.alerts import AlertState, Quote, TickerConfig, evaluate_alert
 from src.bot import FiredAlert, ET, format_alert_message, require_telegram_env, send_message
+from src.store import Store, default_threshold_pct
 
 if TYPE_CHECKING:
     from src.provider import PriceProvider
 
-DEFAULT_THRESHOLD_PCT = 3.0
-
-
-def default_threshold_pct() -> float:
-    raw = os.environ.get("DEFAULT_THRESHOLD_PCT", str(DEFAULT_THRESHOLD_PCT)).strip()
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"DEFAULT_THRESHOLD_PCT must be a number, got {raw!r}"
-        ) from exc
-    if value <= 0 or not math.isfinite(value):
-        raise RuntimeError("DEFAULT_THRESHOLD_PCT must be a positive number")
-    return value
+# Re-export so existing imports (`from src.check_once import default_threshold_pct`) keep working.
+__all__ = [
+    "default_threshold_pct",
+    "evaluate_watchlist",
+    "quotes_from_raw",
+    "run_check",
+    "main",
+]
 
 
 def quotes_from_raw(
@@ -44,20 +37,17 @@ def quotes_from_raw(
 
 def evaluate_watchlist(
     quotes: Mapping[str, Quote],
-    tickers: Sequence[str],
+    configs: Sequence[TickerConfig],
     *,
-    threshold_pct: float,
     day_key: str,
     states: dict[str, AlertState],
-    mode: str = "once",
 ) -> list[FiredAlert]:
-    """Evaluate each ticker; update in-memory `states`; return those that fire."""
+    """Evaluate each ticker config; update `states`; return those that fire."""
     fired: list[FiredAlert] = []
-    for symbol in tickers:
-        quote = quotes.get(symbol) or Quote(price=None, prev_close=None)
-        config = TickerConfig(symbol=symbol, threshold_pct=threshold_pct, mode=mode)
-        decision = evaluate_alert(quote, config, states.get(symbol), day_key)
-        states[symbol] = decision.new_state
+    for config in configs:
+        quote = quotes.get(config.symbol) or Quote(price=None, prev_close=None)
+        decision = evaluate_alert(quote, config, states.get(config.symbol), day_key)
+        states[config.symbol] = decision.new_state
         if not decision.should_alert:
             continue
         if (
@@ -68,7 +58,7 @@ def evaluate_watchlist(
             continue
         fired.append(
             FiredAlert(
-                symbol=symbol,
+                symbol=config.symbol,
                 price=quote.price,
                 prev_close=quote.prev_close,
                 pct_change=decision.pct_change,
@@ -83,21 +73,16 @@ def run_check(
     provider: PriceProvider | None = None,
     sender: Callable[[str], None] | None = None,
     now: datetime | None = None,
-    tickers: Sequence[str] | None = None,
-    threshold_pct: float | None = None,
-    states: dict[str, AlertState] | None = None,
-    mode: str = "once",
+    store: Store | None = None,
 ) -> int:
-    """Fetch demo tickers, evaluate `once` alerts, send one batched Telegram message.
+    """Load watchlist + state from SQLite, evaluate, maybe send, persist state.
 
-    `states` is in-memory only for this process (no SQLite yet). A one-shot CLI
-    run starts empty, so anything currently through the threshold fires.
+    State is keyed by trading `day_key`. A second `--check` the same day (or a
+    redeploy mid-day) will not re-alert names that already fired.
     """
-    from src.main import DEMO_TICKERS
     from src.provider import FinnhubProvider
 
     try:
-        threshold = default_threshold_pct() if threshold_pct is None else threshold_pct
         if sender is None:
             require_telegram_env()
             sender = send_message
@@ -107,23 +92,23 @@ def run_check(
         print(exc, file=sys.stderr)
         return 1
 
-    symbols = list(tickers if tickers is not None else DEMO_TICKERS)
+    db = store if store is not None else Store()
+    configs = db.get_watchlist()
+    if not configs:
+        print("watchlist is empty")
+        return 0
+
+    symbols = [config.symbol for config in configs]
     clock = now if now is not None else datetime.now(ET)
     day_key = clock.astimezone(ET).date().isoformat() if clock.tzinfo else clock.date().isoformat()
-    memory = states if states is not None else {}
+    memory = db.get_alert_states(symbols, day_key)
 
     raw = provider.get_quotes(symbols)
     quotes = quotes_from_raw(raw, symbols)
-    fired = evaluate_watchlist(
-        quotes,
-        symbols,
-        threshold_pct=threshold,
-        day_key=day_key,
-        states=memory,
-        mode=mode,
-    )
+    fired = evaluate_watchlist(quotes, configs, day_key=day_key, states=memory)
 
     if not fired:
+        db.save_alert_states(memory)
         print("no alerts")
         return 0
 
@@ -134,6 +119,7 @@ def run_check(
         print(exc, file=sys.stderr)
         return 1
 
+    db.save_alert_states(memory)
     print("sent:")
     print(text)
     return 0
