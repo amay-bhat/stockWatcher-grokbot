@@ -1,0 +1,1 @@
+# M1 uses stdlib urllib only — no third-party packages.
