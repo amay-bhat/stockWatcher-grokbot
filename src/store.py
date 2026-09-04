@@ -82,6 +82,19 @@ class Store:
             ).fetchall()
         return [_row_to_config(row) for row in rows]
 
+    def get_ticker(self, symbol: str) -> TickerConfig | None:
+        normalized = _normalize_symbol(symbol)
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT symbol, threshold_pct, mode FROM watchlist WHERE symbol = ?",
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_config(row)
+
     def upsert_ticker(
         self,
         symbol: str,

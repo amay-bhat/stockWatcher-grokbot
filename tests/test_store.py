@@ -96,6 +96,15 @@ class TestStoreWatchlist(StoreTestCase):
         row = next(item for item in Store(self.path).get_watchlist() if item.symbol == "TSLA")
         self.assertEqual(row, updated)
 
+    def test_get_ticker_normalizes_and_misses(self) -> None:
+        store = self._store()
+        row = store.get_ticker("nvda")
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.symbol, "NVDA")
+        self.assertIsNone(store.get_ticker("ZZZZ"))
+        self.assertIsNone(store.get_ticker("  "))
+
     def test_upsert_defaults_threshold_from_store(self) -> None:
         store = self._store()
         store.set_default_threshold_pct(4.0)

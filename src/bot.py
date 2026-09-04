@@ -1,4 +1,4 @@
-"""Telegram outbound delivery (M3). Stdlib urllib only — no telegram library."""
+"""Telegram HTTP: outbound sendMessage and inbound getUpdates (stdlib urllib)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ import json
 import os
 from typing import Sequence
 import urllib.error
+import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
+USER_AGENT = "stockWatcher-grokbot/m5"
 
 
 @dataclass(frozen=True)
@@ -76,7 +79,7 @@ def send_message(
         data=payload,
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "stockWatcher-grokbot/m3",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )
@@ -96,6 +99,57 @@ def send_message(
             else "invalid response"
         )
         raise RuntimeError(f"Telegram send failed: {desc}")
+
+
+def is_allowed_chat(chat_id: object, allowed: str) -> bool:
+    """True when `chat_id` matches `TELEGRAM_CHAT_ID` (string compare)."""
+    if chat_id is None or allowed is None:
+        return False
+    return str(chat_id).strip() == str(allowed).strip()
+
+
+def get_updates(
+    *,
+    token: str | None = None,
+    offset: int | None = None,
+    timeout: int = 25,
+    limit: int = 100,
+) -> list[dict]:
+    """Long-poll Telegram getUpdates. Does not print the bot token."""
+    if not token:
+        token, _ = require_telegram_env()
+
+    params: dict[str, int | str] = {"timeout": int(timeout), "limit": int(limit)}
+    if offset is not None:
+        params["offset"] = int(offset)
+    url = TELEGRAM_UPDATES_URL.format(token=token) + "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        method="GET",
+    )
+    http_timeout = float(timeout) + 10.0
+    try:
+        with urllib.request.urlopen(request, timeout=http_timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = _telegram_error_detail(exc)
+        raise RuntimeError(f"Telegram getUpdates failed: HTTP {exc.code}{detail}") from None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"Telegram getUpdates failed: {exc}") from None
+
+    if not isinstance(body, dict) or not body.get("ok"):
+        desc = (
+            body.get("description", "unknown error")
+            if isinstance(body, dict)
+            else "invalid response"
+        )
+        raise RuntimeError(f"Telegram getUpdates failed: {desc}")
+
+    result = body.get("result")
+    if not isinstance(result, list):
+        return []
+    return [item for item in result if isinstance(item, dict)]
 
 
 def _format_row(alert: FiredAlert) -> str:
@@ -145,3 +199,15 @@ def _telegram_error_detail(exc: urllib.error.HTTPError) -> str:
     if isinstance(payload, dict) and payload.get("description"):
         return f": {payload['description']}"
     return ""
+
+
+def main() -> int:
+    from src.bot_commands import run_bot
+
+    return run_bot()
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

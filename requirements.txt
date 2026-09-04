@@ -1,1 +1,1 @@
-# M1–M4 use stdlib urllib + sqlite3 only — no third-party packages.
+# M1–M5 use stdlib urllib + sqlite3 only — no third-party packages.
