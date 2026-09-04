@@ -132,7 +132,7 @@ python3 -m unittest discover -s tests
 
 I/O is in `src/store.py` (stdlib `sqlite3` only). `src/alerts.py` and `PriceProvider` stay pure. `data/` and `*.db` are gitignored.
 
-On Fly later, point `DATABASE_PATH` at the mounted volume, e.g. `/data/watchlist.db` (M7).
+On Fly, `DATABASE_PATH` is `/data/watchlist.db` on the mounted volume (see Deploy below).
 
 ## Milestone 6 — market calendar + scheduler
 
@@ -162,7 +162,7 @@ python3 -m unittest discover -s tests
 | `TELEGRAM_BOT_TOKEN` | M3 send / M5 long-poll / M6 combined serve |
 | `TELEGRAM_CHAT_ID` | M3 send / M5 allowed chat (others ignored) |
 | `DEFAULT_THRESHOLD_PCT` | Seed default (default `3.0`); stored in SQLite after first run; `/default` updates the DB value |
-| `DATABASE_PATH` | M4 SQLite file (default `./data/watchlist.db`; Fly later `/data/watchlist.db`) |
+| `DATABASE_PATH` | M4 SQLite file (default `./data/watchlist.db`; Fly `/data/watchlist.db`) |
 | `CHECK_INTERVAL_MINUTES` | M6 scheduler interval while the regular session is open (default `5`) |
 
 ## Build order
@@ -172,7 +172,94 @@ python3 -m unittest discover -s tests
 - **M3** — Telegram outbound for alerts.
 - **M4** — SQLite store for watchlist / last-seen state.
 - **M5** — Inbound Telegram commands (`/list`, `/add`, …).
-- **M6** — Periodic scheduler + market calendar (this). Combined process: `python -m src.main`.
-- **M7** — Deploy on Fly.io with a SQLite volume.
+- **M6** — Periodic scheduler + market calendar. Combined process: `python -m src.main`.
+- **M7** — Deploy on Fly.io with a SQLite volume (this).
 
-Deploy is not part of M6 (`fly.toml` / Dockerfile / volume mount are M7). Host later: Fly.io + SQLite volume.
+## Deploy (Milestone 7 — Fly.io)
+
+Always-on Fly Machine. Telegram long-poll + the market-hours scheduler (`python -m src.main`). SQLite lives on a persistent volume at `/data/watchlist.db` so a redeploy does not reset the watchlist or re-fire today's alerts.
+
+No public HTTP service. The smallest `shared-cpu-1x` / 256MB VM is enough (~$2–3/mo if it runs 24/7, plus a 1GB volume). Keep **one** Machine — a Fly volume can only attach to one at a time.
+
+Secrets stay out of the repo (`fly secrets set` only). `FINNHUB_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` are required; `CHECK_INTERVAL_MINUTES` and `DEFAULT_THRESHOLD_PCT` keep their code defaults unless you set them.
+
+Three consecutive failed open-session check cycles still send a one-line Telegram warning (M6), then the streak resets. Watch `fly logs` if quotes or Telegram look stuck.
+
+### 1. Install flyctl and log in
+
+macOS:
+
+```bash
+brew install flyctl
+fly auth login
+```
+
+Linux / WSL:
+
+```bash
+curl -L https://fly.io/install.sh | sh
+fly auth login
+```
+
+### 2. Create the app
+
+This repo already has `fly.toml` (app name `stockwatcher-grokbot`) and a `Dockerfile`. From the repo root:
+
+```bash
+fly launch --no-deploy --copy-config --yes --ha=false
+```
+
+`--ha=false` keeps a single Machine (required for the SQLite volume). If the app name is taken globally, change `app = "..."` in `fly.toml` and re-run, or:
+
+```bash
+fly apps create your-app-name
+```
+
+Pick the same region as `primary_region` in `fly.toml` (default `sjc`). Change that key first if you want another [Fly region](https://fly.io/docs/reference/regions/).
+
+### 3. Create the data volume
+
+Volume name must match `source` in `fly.toml` (`data`). Size is 1GB (plenty for SQLite):
+
+```bash
+fly volumes create data --region sjc --size 1
+```
+
+Use the same region as `primary_region`. `fly.toml` also sets `initial_size = "1gb"`, so `fly deploy` can create the volume if this step was skipped.
+
+### 4. Set secrets
+
+```bash
+fly secrets set \
+  FINNHUB_API_KEY=your_key \
+  TELEGRAM_BOT_TOKEN=your_bot_token \
+  TELEGRAM_CHAT_ID=your_chat_id
+```
+
+Do not put these values in `fly.toml`, `.env`, or git.
+
+### 5. Deploy
+
+```bash
+fly deploy
+```
+
+Confirm it stays up:
+
+```bash
+fly status
+fly logs
+```
+
+Ctrl+C is local-only. On Fly, `fly apps restart` / a new `fly deploy` recycles the Machine; the volume keeps `/data/watchlist.db`.
+
+### After deploy
+
+| Command | Effect |
+| --- | --- |
+| `fly logs` | Follow stdout/stderr (scheduler + bot) |
+| `fly status` | Machine running? volume attached? |
+| `fly ssh console` | Shell on the Machine (`ls /data`) |
+| `fly apps restart` | Bounce the process without rebuilding |
+
+In Telegram, `/list` and `/status` should work the same as locally. First boot of an empty volume seeds the demo tickers (`NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL`).
