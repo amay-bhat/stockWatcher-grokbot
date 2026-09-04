@@ -1,0 +1,27 @@
+# Watchlist Drop Alerts — always-on Fly Machine + SQLite volume.
+# App names are global; change this if `stockwatcher-grokbot` is taken.
+app = "stockwatcher-grokbot"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATABASE_PATH = "/data/watchlist.db"
+  # Secrets (FINNHUB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) via
+  # `fly secrets set` — never commit them here.
+
+# No [http_service]: this process long-polls Telegram; it does not serve HTTP.
+# Without a service, Fly Proxy will not auto-stop the Machine.
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[[restart]]
+  policy = "always"
