@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import math
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -102,6 +103,7 @@ def run_bot(
     max_polls: int | None = None,
     get_updates_fn: Callable[..., list[dict]] | None = None,
     send_fn: Callable[[str], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> int:
     """Long-poll Telegram and handle commands until interrupted."""
     from src.provider import FinnhubProvider
@@ -122,6 +124,9 @@ def run_bot(
     offset: int | None = None
     polls = 0
     while True:
+        if stop is not None and stop.is_set():
+            print("bot stopped", flush=True)
+            return 0
         try:
             updates = poll(token=token, offset=offset, timeout=poll_timeout)
         except KeyboardInterrupt:

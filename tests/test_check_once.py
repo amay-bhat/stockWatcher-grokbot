@@ -294,10 +294,28 @@ class TestRunCheck(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("TELEGRAM_BOT_TOKEN", stderr.getvalue())
 
-    def test_cli_default_is_not_check(self) -> None:
-        with patch("src.main.print_quotes", return_value=0) as printer:
+    def test_all_quotes_failed_does_not_persist_or_send(self) -> None:
+        quotes = {
+            ticker: {"price": None, "prev_close": None} for ticker in DEMO_TICKERS
+        }
+        sent: list[str] = []
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            code = run_check(
+                provider=FakeProvider(quotes),
+                sender=sent.append,
+                now=datetime(2026, 9, 4, 10, 45, tzinfo=ET),
+                store=self._store(),
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(sent, [])
+        self.assertIn("quote fetch failed", stderr.getvalue())
+        self.assertIsNone(Store(self.path).get_alert_state("NVDA", "2026-09-04"))
+
+    def test_cli_default_is_serve(self) -> None:
+        with patch("src.scheduler.run_serve", return_value=0) as serve:
             self.assertEqual(cli_main([]), 0)
-            printer.assert_called_once()
+            serve.assert_called_once()
 
     def test_cli_check_dispatches(self) -> None:
         with patch("src.check_once.run_check", return_value=0) as check:

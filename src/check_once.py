@@ -8,7 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from src.alerts import AlertState, Quote, TickerConfig, evaluate_alert
-from src.bot import FiredAlert, ET, format_alert_message, require_telegram_env, send_message
+from src.bot import FiredAlert, format_alert_message, require_telegram_env, send_message
+from src.calendar import ET, trading_day_key
 from src.store import Store, default_threshold_pct
 
 if TYPE_CHECKING:
@@ -100,10 +101,13 @@ def run_check(
 
     symbols = [config.symbol for config in configs]
     clock = now if now is not None else datetime.now(ET)
-    day_key = clock.astimezone(ET).date().isoformat() if clock.tzinfo else clock.date().isoformat()
+    day_key = trading_day_key(clock)
     memory = db.get_alert_states(symbols, day_key)
 
     raw = provider.get_quotes(symbols)
+    if not any(_raw_quote_usable(raw.get(symbol)) for symbol in symbols):
+        print("quote fetch failed for all tickers", file=sys.stderr)
+        return 1
     quotes = quotes_from_raw(raw, symbols)
     fired = evaluate_watchlist(quotes, configs, day_key=day_key, states=memory)
 
@@ -123,6 +127,21 @@ def run_check(
     print("sent:")
     print(text)
     return 0
+
+
+def _raw_quote_usable(row: Mapping[str, float | None] | None) -> bool:
+    if not row:
+        return False
+    price = row.get("price")
+    prev_close = row.get("prev_close")
+    return (
+        isinstance(price, (int, float))
+        and isinstance(prev_close, (int, float))
+        and price == price
+        and prev_close == prev_close
+        and price != 0
+        and prev_close != 0
+    )
 
 
 def main() -> int:

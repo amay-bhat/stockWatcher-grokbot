@@ -10,9 +10,8 @@ from typing import Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
-from zoneinfo import ZoneInfo
 
-ET = ZoneInfo("America/New_York")
+from src.calendar import ET
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TELEGRAM_UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
 USER_AGENT = "stockWatcher-grokbot/m5"
