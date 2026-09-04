@@ -1,1 +1,1 @@
-# M1 uses stdlib urllib only — no third-party packages.
+# M1–M3 use stdlib urllib only — no third-party packages.
