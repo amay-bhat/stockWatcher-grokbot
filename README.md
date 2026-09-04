@@ -30,7 +30,7 @@ python3 -m unittest discover -s tests
 
 ## Milestone 3 — Telegram outbound
 
-`--check` evaluates the watchlist and, if anything fires, sends **one batched Telegram message**. No inbound commands.
+`--check` evaluates the watchlist and, if anything fires, sends **one batched Telegram message**. Inbound commands are M5.
 
 ### Create a bot and get a chat id
 
@@ -56,6 +56,43 @@ python -m src.check_once
 
 If nothing is down enough, stdout is `no alerts`. If something fires, stdout prints `sent:` plus the message body. Missing `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` is a hard error (nothing is sent). Default `python -m src.main` is still the quote printer and does not need Telegram.
 
+## Milestone 5 — Telegram command listener
+
+The bot is the config UI. Long-poll `getUpdates` (stdlib urllib, no telegram library) and persist every mutation through `src/store.py`. Commands from any chat other than `TELEGRAM_CHAT_ID` are ignored silently. Tickers are normalized to uppercase. `/add` asks Finnhub for a quote and rejects unknown / zero / null symbols.
+
+```bash
+export FINNHUB_API_KEY=your_key
+export TELEGRAM_BOT_TOKEN=your_bot_token
+export TELEGRAM_CHAT_ID=your_chat_id
+export DATABASE_PATH=./data/watchlist.db
+
+python -m src.main --bot
+# same thing:
+python -m src.bot
+```
+
+Ctrl+C stops the listener. `--check` and the default quote printer are unchanged.
+
+| Command | Effect |
+| --- | --- |
+| `/list` | Tickers with threshold and mode |
+| `/add TICKER [pct]` | Add (optional threshold, else stored default); Finnhub-validated |
+| `/remove TICKER` | Remove |
+| `/set TICKER pct` | Change threshold |
+| `/mode TICKER once\|legs\|mute` | Change mode |
+| `/mute TICKER` | Shorthand for mode mute |
+| `/status` | Current price and % change |
+| `/check` | Immediate poll cycle (`check_once`) |
+| `/default pct` | Persist global default threshold |
+| `/help` | Command reference |
+
+Mutating commands reply with a one-line echo of the new state (e.g. `TSLA  3%  once`).
+
+```bash
+python3 -m unittest tests.test_bot_commands tests.test_bot
+python3 -m unittest discover -s tests
+```
+
 ## Milestone 4 — SQLite persistence
 
 Watchlist config and per-day alert state live in a local SQLite file so a process restart (or a mid-day redeploy) does **not** re-alert names that already fired this trading day.
@@ -77,9 +114,9 @@ On Fly later, point `DATABASE_PATH` at the mounted volume, e.g. `/data/watchlist
 | Variable | Used in |
 | --- | --- |
 | `FINNHUB_API_KEY` | Quote fetch |
-| `TELEGRAM_BOT_TOKEN` | M3 Telegram send |
-| `TELEGRAM_CHAT_ID` | M3 Telegram send |
-| `DEFAULT_THRESHOLD_PCT` | Seed default (default `3.0`); stored in SQLite after first run |
+| `TELEGRAM_BOT_TOKEN` | M3 send / M5 long-poll |
+| `TELEGRAM_CHAT_ID` | M3 send / M5 allowed chat (others ignored) |
+| `DEFAULT_THRESHOLD_PCT` | Seed default (default `3.0`); stored in SQLite after first run; `/default` updates the DB value |
 | `DATABASE_PATH` | M4 SQLite file (default `./data/watchlist.db`; Fly later `/data/watchlist.db`) |
 | `CHECK_INTERVAL_MINUTES` | later (scheduler stub) |
 
@@ -88,9 +125,9 @@ On Fly later, point `DATABASE_PATH` at the mounted volume, e.g. `/data/watchlist
 - **M1** — Finnhub `/quote` fetch; print current vs previous close.
 - **M2** — Drop alerts vs previous close using a percent threshold (`once` / `legs` / `mute`).
 - **M3** — Telegram outbound for alerts.
-- **M4** — SQLite store for watchlist / last-seen state (this).
-- **M5** — Inbound Telegram commands (`/list`, `/add`, …).
+- **M4** — SQLite store for watchlist / last-seen state.
+- **M5** — Inbound Telegram commands (`/list`, `/add`, …) (this).
 - **M6** — Periodic scheduler + market calendar (skip closed sessions).
 - **M7** — Deploy on Fly.io with a SQLite volume.
 
-Deploy is not part of M4. Host later: Fly.io + SQLite volume.
+Deploy is not part of M5. No scheduler daemon here — that is M6. Host later: Fly.io + SQLite volume.

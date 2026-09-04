@@ -1,4 +1,4 @@
-"""CLI: quote printer (default) or one-shot Telegram drop check (`--check`)."""
+"""CLI: quote printer (default), `--check`, or `--bot` Telegram command listener."""
 
 from __future__ import annotations
 
@@ -54,18 +54,28 @@ def print_quotes() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Watchlist Drop Alerts — quote printer or one-shot Telegram check.",
+        description="Watchlist Drop Alerts — quote printer, one-shot check, or Telegram bot.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="Fetch quotes, evaluate drop alerts, send one Telegram message if any fire",
+    )
+    mode.add_argument(
+        "--bot",
+        action="store_true",
+        help="Long-poll Telegram for inbound watchlist commands",
     )
     args = parser.parse_args(argv)
     if args.check:
         from src.check_once import run_check
 
         return run_check()
+    if args.bot:
+        from src.bot_commands import run_bot
+
+        return run_bot()
     return print_quotes()
 
 

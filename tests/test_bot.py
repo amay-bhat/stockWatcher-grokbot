@@ -13,6 +13,8 @@ from src.bot import (
     ET,
     FiredAlert,
     format_alert_message,
+    get_updates,
+    is_allowed_chat,
     require_telegram_env,
     send_message,
 )
@@ -180,6 +182,63 @@ class TestSendMessage(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 send_message("hello")
         self.assertIn("TELEGRAM_BOT_TOKEN", str(ctx.exception))
+
+
+class TestAllowedChat(unittest.TestCase):
+    def test_int_and_string_match(self) -> None:
+        self.assertTrue(is_allowed_chat(123, "123"))
+        self.assertTrue(is_allowed_chat("-99", " -99 "))
+        self.assertFalse(is_allowed_chat(1, "123"))
+        self.assertFalse(is_allowed_chat(None, "123"))
+
+
+class TestGetUpdates(unittest.TestCase):
+    def test_long_poll_query_and_offset(self) -> None:
+        captured: dict = {}
+
+        def fake_urlopen(request, timeout=35.0):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            captured["method"] = request.get_method()
+            return _FakeResponse(
+                {
+                    "ok": True,
+                    "result": [
+                        {"update_id": 7, "message": {"text": "/list"}},
+                        "ignored",
+                    ],
+                }
+            )
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            updates = get_updates(token="secret-token", offset=4, timeout=25)
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["update_id"], 7)
+        self.assertIn("/botsecret-token/getUpdates", captured["url"])
+        self.assertIn("offset=4", captured["url"])
+        self.assertIn("timeout=25", captured["url"])
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(captured["timeout"], 35.0)
+
+    def test_http_error_does_not_leak_token(self) -> None:
+        error = urllib.error.HTTPError(
+            url="https://api.telegram.org/botsecret-token/getUpdates",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+
+        def raise_http(*args, **kwargs):
+            raise error
+
+        with patch("urllib.request.urlopen", side_effect=raise_http):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_updates(token="secret-token")
+        message = str(ctx.exception)
+        self.assertIn("HTTP 401", message)
+        self.assertNotIn("secret-token", message)
 
 
 if __name__ == "__main__":
