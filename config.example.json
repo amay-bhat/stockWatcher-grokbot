@@ -1,9 +1,9 @@
 {
   "watchlist": [
-    { "ticker": "NVDA", "threshold_pct": 3.0 },
-    { "ticker": "AMD", "threshold_pct": 3.0 },
-    { "ticker": "AAPL", "threshold_pct": 2.5 },
-    { "ticker": "MSFT", "threshold_pct": 2.5 },
+    { "ticker": "NVDA", "threshold_pct": 3.0, "mode": "once" },
+    { "ticker": "AMD", "threshold_pct": 3.0, "mode": "legs" },
+    { "ticker": "AAPL", "threshold_pct": 2.5, "mode": "once" },
+    { "ticker": "MSFT", "threshold_pct": 2.5, "mode": "mute" },
     { "ticker": "GOOGL", "threshold_pct": 2.5 }
   ],
   "default_threshold_pct": 3.0,
