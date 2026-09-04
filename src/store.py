@@ -1,1 +1,306 @@
-"""SQLite persistence — stub (later milestone)."""
+"""SQLite persistence for watchlist config and per-day alert state (M4).
+
+I/O lives here. `alerts.py` and `PriceProvider` stay pure. Stdlib `sqlite3` only.
+
+Path comes from `DATABASE_PATH` (default `./data/watchlist.db`). An empty database
+is seeded once with the demo tickers at `DEFAULT_THRESHOLD_PCT` and mode `once`.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+import math
+import os
+import sqlite3
+from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
+
+from src.alerts import VALID_MODES, AlertMode, AlertState, TickerConfig
+
+DEFAULT_THRESHOLD_PCT = 3.0
+DEFAULT_DATABASE_PATH = "./data/watchlist.db"
+SEED_TICKERS = ("NVDA", "AMD", "AAPL", "MSFT", "GOOGL")
+
+_SETTING_SEEDED = "seeded"
+_SETTING_DEFAULT_THRESHOLD = "default_threshold_pct"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol TEXT PRIMARY KEY,
+    threshold_pct REAL NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'once'
+);
+
+CREATE TABLE IF NOT EXISTS alert_state (
+    symbol TEXT NOT NULL,
+    day_key TEXT NOT NULL,
+    fired INTEGER NOT NULL DEFAULT 0,
+    last_leg INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (symbol, day_key)
+);
+"""
+
+
+def database_path() -> str:
+    raw = os.environ.get("DATABASE_PATH", DEFAULT_DATABASE_PATH).strip()
+    return raw or DEFAULT_DATABASE_PATH
+
+
+def default_threshold_pct() -> float:
+    """Read `DEFAULT_THRESHOLD_PCT` from the environment (not the DB)."""
+    raw = os.environ.get("DEFAULT_THRESHOLD_PCT", str(DEFAULT_THRESHOLD_PCT)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"DEFAULT_THRESHOLD_PCT must be a number, got {raw!r}"
+        ) from exc
+    if value <= 0 or not math.isfinite(value):
+        raise RuntimeError("DEFAULT_THRESHOLD_PCT must be a positive number")
+    return value
+
+
+class Store:
+    """File-backed watchlist + per-ticker `AlertState` keyed by `day_key`."""
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path if path is not None else database_path()
+        self._ensure_parent()
+        with self._connect() as conn:
+            self._init_schema(conn)
+            self._seed_if_needed(conn)
+
+    def get_watchlist(self) -> list[TickerConfig]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, threshold_pct, mode FROM watchlist ORDER BY rowid"
+            ).fetchall()
+        return [_row_to_config(row) for row in rows]
+
+    def upsert_ticker(
+        self,
+        symbol: str,
+        threshold_pct: float | None = None,
+        mode: str = "once",
+    ) -> TickerConfig:
+        normalized = _normalize_symbol(symbol)
+        if not normalized:
+            raise ValueError("ticker symbol is required")
+        threshold = (
+            self.get_default_threshold_pct()
+            if threshold_pct is None
+            else _require_positive_threshold(threshold_pct)
+        )
+        alert_mode = _normalize_mode(mode)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO watchlist (symbol, threshold_pct, mode)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    threshold_pct = excluded.threshold_pct,
+                    mode = excluded.mode
+                """,
+                (normalized, threshold, alert_mode),
+            )
+        return TickerConfig(
+            symbol=normalized, threshold_pct=threshold, mode=alert_mode
+        )
+
+    def remove_ticker(self, symbol: str) -> bool:
+        normalized = _normalize_symbol(symbol)
+        if not normalized:
+            return False
+        with self._connect() as conn:
+            conn.execute("DELETE FROM alert_state WHERE symbol = ?", (normalized,))
+            cursor = conn.execute(
+                "DELETE FROM watchlist WHERE symbol = ?", (normalized,)
+            )
+            return cursor.rowcount > 0
+
+    def get_alert_state(self, symbol: str, day_key: str) -> AlertState | None:
+        normalized = _normalize_symbol(symbol)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT day_key, fired, last_leg FROM alert_state
+                WHERE symbol = ? AND day_key = ?
+                """,
+                (normalized, day_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_state(row)
+
+    def save_alert_state(self, symbol: str, state: AlertState) -> None:
+        normalized = _normalize_symbol(symbol)
+        if not normalized:
+            raise ValueError("ticker symbol is required")
+        with self._connect() as conn:
+            _upsert_state(conn, normalized, state)
+
+    def get_alert_states(
+        self, symbols: Sequence[str], day_key: str
+    ) -> dict[str, AlertState]:
+        """Load saved state for `day_key`. Missing tickers are omitted."""
+        if not symbols:
+            return {}
+        normalized = [_normalize_symbol(symbol) for symbol in symbols]
+        normalized = [symbol for symbol in normalized if symbol]
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" * len(normalized))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT symbol, day_key, fired, last_leg FROM alert_state
+                WHERE day_key = ? AND symbol IN ({placeholders})
+                """,
+                (day_key, *normalized),
+            ).fetchall()
+        return {str(row["symbol"]): _row_to_state(row) for row in rows}
+
+    def save_alert_states(self, states: Mapping[str, AlertState]) -> None:
+        with self._connect() as conn:
+            for symbol, state in states.items():
+                normalized = _normalize_symbol(symbol)
+                if not normalized:
+                    continue
+                _upsert_state(conn, normalized, state)
+
+    def get_default_threshold_pct(self) -> float:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (_SETTING_DEFAULT_THRESHOLD,),
+            ).fetchone()
+        if row is None:
+            return default_threshold_pct()
+        try:
+            value = float(row["value"])
+        except (TypeError, ValueError):
+            return default_threshold_pct()
+        if value <= 0 or not math.isfinite(value):
+            return default_threshold_pct()
+        return value
+
+    def set_default_threshold_pct(self, value: float) -> float:
+        threshold = _require_positive_threshold(value)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_SETTING_DEFAULT_THRESHOLD, _format_threshold(threshold)),
+            )
+        return threshold
+
+    def _ensure_parent(self) -> None:
+        parent = Path(self.path).parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _init_schema(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(_SCHEMA)
+
+    def _seed_if_needed(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (_SETTING_SEEDED,)
+        ).fetchone()
+        if row is not None:
+            return
+        tickers = SEED_TICKERS
+        threshold = default_threshold_pct()
+        conn.execute(
+            """
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (_SETTING_DEFAULT_THRESHOLD, _format_threshold(threshold)),
+        )
+        for symbol in tickers:
+            normalized = _normalize_symbol(symbol)
+            if not normalized:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO watchlist (symbol, threshold_pct, mode)
+                VALUES (?, ?, 'once')
+                """,
+                (normalized, threshold),
+            )
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, '1')",
+            (_SETTING_SEEDED,),
+        )
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return (symbol or "").strip().upper()
+
+
+def _normalize_mode(mode: str) -> AlertMode:
+    normalized = (mode or "once").strip().lower()
+    if normalized in VALID_MODES:
+        return normalized  # type: ignore[return-value]
+    return "once"
+
+
+def _require_positive_threshold(value: float) -> float:
+    threshold = float(value)
+    if threshold <= 0 or not math.isfinite(threshold):
+        raise ValueError("threshold_pct must be a positive number")
+    return threshold
+
+
+def _format_threshold(value: float) -> str:
+    return repr(float(value))
+
+
+def _row_to_config(row: sqlite3.Row) -> TickerConfig:
+    return TickerConfig(
+        symbol=str(row["symbol"]),
+        threshold_pct=float(row["threshold_pct"]),
+        mode=_normalize_mode(str(row["mode"])),
+    )
+
+
+def _row_to_state(row: sqlite3.Row) -> AlertState:
+    return AlertState(
+        day_key=str(row["day_key"]),
+        fired=bool(row["fired"]),
+        last_leg=int(row["last_leg"]),
+    )
+
+
+def _upsert_state(conn: sqlite3.Connection, symbol: str, state: AlertState) -> None:
+    conn.execute(
+        """
+        INSERT INTO alert_state (symbol, day_key, fired, last_leg)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(symbol, day_key) DO UPDATE SET
+            fired = excluded.fired,
+            last_leg = excluded.last_leg
+        """,
+        (symbol, state.day_key, 1 if state.fired else 0, int(state.last_leg)),
+    )

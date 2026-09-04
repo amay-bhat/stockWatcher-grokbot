@@ -17,7 +17,7 @@ Prints one line per demo ticker (`NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL`):
 NVDA  $120.50  +1.23%  (prev close $119.04)
 ```
 
-Null or zero prices are skipped (no fake -100% moves). `config.example.json` is the later watchlist shape; M1–M3 ignore it.
+Null or zero prices are skipped (no fake -100% moves). `config.example.json` is the later watchlist shape; M1–M3 ignored it. M4 stores the live watchlist in SQLite instead.
 
 ## Tests (Milestone 2)
 
@@ -30,7 +30,7 @@ python3 -m unittest discover -s tests
 
 ## Milestone 3 — Telegram outbound
 
-Still a **static hardcoded watchlist** (the five demo tickers). `--check` evaluates each quote with default threshold **3%** and mode **`once`**, using in-memory state for that process only. If any fire, **one batched Telegram message** is sent. No inbound commands, no SQLite yet.
+`--check` evaluates the watchlist and, if anything fires, sends **one batched Telegram message**. No inbound commands.
 
 ### Create a bot and get a chat id
 
@@ -44,8 +44,10 @@ Still a **static hardcoded watchlist** (the five demo tickers). `--check` evalua
 export FINNHUB_API_KEY=your_key
 export TELEGRAM_BOT_TOKEN=your_bot_token
 export TELEGRAM_CHAT_ID=your_chat_id
-# optional; default 3.0
+# optional; default 3.0 (used when seeding an empty DB)
 export DEFAULT_THRESHOLD_PCT=3.0
+# optional; default ./data/watchlist.db
+export DATABASE_PATH=./data/watchlist.db
 
 python -m src.main --check
 # same thing:
@@ -54,7 +56,21 @@ python -m src.check_once
 
 If nothing is down enough, stdout is `no alerts`. If something fires, stdout prints `sent:` plus the message body. Missing `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` is a hard error (nothing is sent). Default `python -m src.main` is still the quote printer and does not need Telegram.
 
-Each `--check` process starts with empty alert memory, so a name that is still through the threshold will notify again on the next run (persistence is M4).
+## Milestone 4 — SQLite persistence
+
+Watchlist config and per-day alert state live in a local SQLite file so a process restart (or a mid-day redeploy) does **not** re-alert names that already fired this trading day.
+
+On first run / empty DB the store seeds `NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL` at `DEFAULT_THRESHOLD_PCT` (default `3.0`) with mode `once`. After that, ticker rows and `AlertState` (`day_key` / `fired` / `last_leg`) are loaded and written by `check_once`.
+
+```bash
+export DATABASE_PATH=./data/watchlist.db
+python3 -m unittest tests.test_store tests.test_check_once
+python3 -m unittest discover -s tests
+```
+
+I/O is in `src/store.py` (stdlib `sqlite3` only). `src/alerts.py` and `PriceProvider` stay pure. `data/` and `*.db` are gitignored.
+
+On Fly later, point `DATABASE_PATH` at the mounted volume, e.g. `/data/watchlist.db` (M7).
 
 ## Environment variables
 
@@ -63,17 +79,18 @@ Each `--check` process starts with empty alert memory, so a name that is still t
 | `FINNHUB_API_KEY` | Quote fetch |
 | `TELEGRAM_BOT_TOKEN` | M3 Telegram send |
 | `TELEGRAM_CHAT_ID` | M3 Telegram send |
-| `DEFAULT_THRESHOLD_PCT` | M3 check (default `3.0`) |
+| `DEFAULT_THRESHOLD_PCT` | Seed default (default `3.0`); stored in SQLite after first run |
+| `DATABASE_PATH` | M4 SQLite file (default `./data/watchlist.db`; Fly later `/data/watchlist.db`) |
 | `CHECK_INTERVAL_MINUTES` | later (scheduler stub) |
 
 ## Build order
 
 - **M1** — Finnhub `/quote` fetch; print current vs previous close.
 - **M2** — Drop alerts vs previous close using a percent threshold (`once` / `legs` / `mute`).
-- **M3** — Telegram outbound for alerts (this).
-- **M4** — SQLite store for watchlist / last-seen state.
+- **M3** — Telegram outbound for alerts.
+- **M4** — SQLite store for watchlist / last-seen state (this).
 - **M5** — Inbound Telegram commands (`/list`, `/add`, …).
 - **M6** — Periodic scheduler + market calendar (skip closed sessions).
 - **M7** — Deploy on Fly.io with a SQLite volume.
 
-Deploy is not part of M3. Host later: Fly.io + SQLite volume.
+Deploy is not part of M4. Host later: Fly.io + SQLite volume.

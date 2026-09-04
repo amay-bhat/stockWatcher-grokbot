@@ -6,8 +6,9 @@ import argparse
 import sys
 
 from src.provider import FinnhubProvider
+from src.store import SEED_TICKERS
 
-DEMO_TICKERS = ["NVDA", "AMD", "AAPL", "MSFT", "GOOGL"]
+DEMO_TICKERS = list(SEED_TICKERS)
 
 
 def format_quote_line(ticker: str, quote: dict[str, float | None] | None) -> str | None:
