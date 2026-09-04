@@ -24,13 +24,13 @@ Null or zero prices are skipped (no fake -100% moves). `config.example.json` is 
 Alert decisions live in `src/alerts.py` as pure functions (no I/O, no clock). Baseline is previous close; a ticker fires when the drop is at least its `threshold_pct`. Modes: `once` (first cross only), `legs` (again each extra full step down), `mute` (never). Daily reset is the caller-supplied `day_key`. Run tests with stdlib unittest from the repo root:
 
 ```bash
-python -m unittest tests.test_alerts
+python3 -m unittest tests.test_alerts
 ```
 
 Or discover everything under `tests/`:
 
 ```bash
-python -m unittest discover -s tests
+python3 -m unittest discover -s tests
 ```
 
 ## Environment variables
