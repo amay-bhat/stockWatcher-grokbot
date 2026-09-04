@@ -4,9 +4,12 @@ No I/O, no network, no clock reads. Callers pass `day_key` so daily reset
 is explicit. Baseline is previous close:
 
     pct_change = (current - previous_close) / previous_close
+    dollar_drop = previous_close - current   # positive when down
 
-Trigger when that ratio is at or below `-threshold_pct / 100` (threshold is a
-positive percent, e.g. 3.0 means -3%).
+Each ticker has a unit (`pct` default, or `usd`):
+
+- pct: fire when `pct_change <= -threshold_pct / 100`
+- usd: fire when `dollar_drop >= threshold_usd`
 """
 
 from __future__ import annotations
@@ -16,7 +19,9 @@ import math
 from typing import Literal
 
 AlertMode = Literal["once", "legs", "mute"]
+ThresholdUnit = Literal["pct", "usd"]
 VALID_MODES: frozenset[str] = frozenset({"once", "legs", "mute"})
+VALID_UNITS: frozenset[str] = frozenset({"pct", "usd"})
 
 
 @dataclass(frozen=True)
@@ -29,11 +34,13 @@ class Quote:
 
 @dataclass(frozen=True)
 class TickerConfig:
-    """Per-ticker alert settings. `mode` defaults to once."""
+    """Per-ticker alert settings. `mode` defaults to once; unit defaults to pct."""
 
     symbol: str
     threshold_pct: float
     mode: AlertMode = "once"
+    threshold_unit: ThresholdUnit = "pct"
+    threshold_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ class Decision:
     new_state: AlertState
     leg: int | None = None
     pct_change: float | None = None
+    dollar_drop: float | None = None
 
 
 def fresh_state(day_key: str) -> AlertState:
@@ -73,6 +81,15 @@ def pct_change(quote: Quote) -> float | None:
     return (price - prev_close) / prev_close
 
 
+def dollar_drop(quote: Quote) -> float | None:
+    """previous_close - current (positive when down), or None if unusable."""
+    price = quote.price
+    prev_close = quote.prev_close
+    if not _usable_price(price) or not _usable_price(prev_close):
+        return None
+    return prev_close - price
+
+
 def evaluate_alert(
     quote: Quote,
     config: TickerConfig,
@@ -86,46 +103,73 @@ def evaluate_alert(
     quotes never alert and leave `state` unchanged.
     """
     change = pct_change(quote)
-    if change is None:
+    drop = dollar_drop(quote)
+    if change is None or drop is None:
         return Decision(
             should_alert=False,
             new_state=state if state is not None else fresh_state(day_key),
             pct_change=None,
+            dollar_drop=None,
         )
 
     working = _state_for_day(state, day_key)
     mode = _normalize_mode(config.mode)
-    threshold_pct = config.threshold_pct
-    if threshold_pct <= 0 or not math.isfinite(threshold_pct):
-        return Decision(should_alert=False, new_state=working, pct_change=change)
-
     if mode == "mute":
-        return Decision(should_alert=False, new_state=working, pct_change=change)
+        return Decision(
+            should_alert=False,
+            new_state=working,
+            pct_change=change,
+            dollar_drop=drop,
+        )
 
-    steps = _steps_down(change, threshold_pct)
+    steps = _steps_for_config(change, drop, config)
+    if steps is None:
+        return Decision(
+            should_alert=False,
+            new_state=working,
+            pct_change=change,
+            dollar_drop=drop,
+        )
+
     if mode == "once":
-        return _decide_once(working, change, steps)
-    return _decide_legs(working, change, steps)
+        return _decide_once(working, change, drop, steps)
+    return _decide_legs(working, change, drop, steps)
 
 
-def _decide_once(state: AlertState, change: float, steps: int) -> Decision:
+def _decide_once(
+    state: AlertState, change: float, drop: float, steps: int
+) -> Decision:
     if steps < 1 or state.fired:
-        return Decision(should_alert=False, new_state=state, pct_change=change)
+        return Decision(
+            should_alert=False,
+            new_state=state,
+            pct_change=change,
+            dollar_drop=drop,
+        )
     return Decision(
         should_alert=True,
         new_state=AlertState(day_key=state.day_key, fired=True, last_leg=state.last_leg),
         pct_change=change,
+        dollar_drop=drop,
     )
 
 
-def _decide_legs(state: AlertState, change: float, steps: int) -> Decision:
+def _decide_legs(
+    state: AlertState, change: float, drop: float, steps: int
+) -> Decision:
     if steps <= state.last_leg:
-        return Decision(should_alert=False, new_state=state, pct_change=change)
+        return Decision(
+            should_alert=False,
+            new_state=state,
+            pct_change=change,
+            dollar_drop=drop,
+        )
     return Decision(
         should_alert=True,
         new_state=AlertState(day_key=state.day_key, fired=state.fired, last_leg=steps),
         leg=steps,
         pct_change=change,
+        dollar_drop=drop,
     )
 
 
@@ -142,6 +186,13 @@ def _normalize_mode(mode: str) -> str:
     return "once"
 
 
+def _normalize_unit(unit: str) -> str:
+    normalized = (unit or "pct").strip().lower()
+    if normalized in VALID_UNITS:
+        return normalized
+    return "pct"
+
+
 def _usable_price(value: object) -> bool:
     return (
         isinstance(value, (int, float))
@@ -149,6 +200,29 @@ def _usable_price(value: object) -> bool:
         and math.isfinite(value)
         and value > 0
     )
+
+
+def _positive_threshold(value: float | None) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _steps_for_config(change: float, drop: float, config: TickerConfig) -> int | None:
+    """Full threshold steps crossed, or None if the active threshold is invalid."""
+    unit = _normalize_unit(config.threshold_unit)
+    if unit == "usd":
+        threshold = config.threshold_usd
+        if not _positive_threshold(threshold):
+            return None
+        return _steps_down_usd(drop, float(threshold))
+    threshold_pct = config.threshold_pct
+    if not _positive_threshold(threshold_pct):
+        return None
+    return _steps_down(change, threshold_pct)
 
 
 def _steps_down(change: float, threshold_pct: float) -> int:
@@ -159,3 +233,10 @@ def _steps_down(change: float, threshold_pct: float) -> int:
     """
     drop_pct = -change * 100.0
     return max(0, math.floor(drop_pct / threshold_pct + 1e-9))
+
+
+def _steps_down_usd(drop: float, threshold_usd: float) -> int:
+    """How many full `threshold_usd` steps the dollar drop has crossed (0 if none)."""
+    if drop <= 0:
+        return 0
+    return max(0, math.floor(drop / threshold_usd + 1e-9))

@@ -44,7 +44,7 @@ Null or zero prices are skipped (no fake -100% moves). `config.example.json` is 
 
 ## Tests (Milestone 2)
 
-Alert decisions live in `src/alerts.py` as pure functions (no I/O, no clock). Baseline is previous close; a ticker fires when the drop is at least its `threshold_pct`. Modes: `once` (first cross only), `legs` (again each extra full step down), `mute` (never). Daily reset is the caller-supplied `day_key`.
+Alert decisions live in `src/alerts.py` as pure functions (no I/O, no clock). Baseline is previous close. Each ticker has a unit: **`pct` (default)** fires when the drop is at least `threshold_pct`; **`usd`** fires when `prev_close - price` is at least `threshold_usd` dollars. Modes: `once` (first cross only), `legs` (again each extra full step down — 1×, 2×, 3× the same percent or dollar amount), `mute` (never). Daily reset is the caller-supplied `day_key`.
 
 ```bash
 python3 -m unittest tests.test_alerts
@@ -101,9 +101,9 @@ Ctrl+C stops the listener. Prefer `python -m src.main` so commands keep working 
 | Command | Effect |
 | --- | --- |
 | `/list` | Tickers with threshold and mode |
-| `/add TICKER [pct]` | Add (optional threshold, else stored default); Finnhub-validated |
+| `/add TICKER [pct\|$5]` | Add (optional threshold, else stored default); Finnhub-validated. `$5` or `5usd` stores a dollar drop from previous close |
 | `/remove TICKER` | Remove |
-| `/set TICKER pct` | Change threshold |
+| `/set TICKER 5%\|$5` | Change threshold and unit (`5` / `5%` = percent; `$5` / `5usd` = dollars). `/set TICKER pct` switches back to the stored percent |
 | `/mode TICKER once\|legs\|mute` | Change mode |
 | `/mute TICKER` | Shorthand for mode mute |
 | `/status` | Current price and % change |
@@ -111,7 +111,9 @@ Ctrl+C stops the listener. Prefer `python -m src.main` so commands keep working 
 | `/default pct` | Persist global default threshold |
 | `/help` | Command reference |
 
-Mutating commands reply with a one-line echo of the new state (e.g. `TSLA  3%  once`).
+Mutating commands reply with a one-line echo of the new state (e.g. `TSLA  3%  once` or `NVDA  $5  once`).
+
+Dollar thresholds are still versus **previous close**, not cost basis. Existing SQLite rows migrate in place (`threshold_unit=pct`, `threshold_usd` null).
 
 ```bash
 python3 -m unittest tests.test_bot_commands tests.test_bot

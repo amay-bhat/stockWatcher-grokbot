@@ -66,6 +66,36 @@ class TestFormatAlertMessage(unittest.TestCase):
         self.assertIn("−6.1% (2nd leg)", text)
         self.assertNotIn("1st leg", text)
 
+    def test_usd_drop_shows_dollars_not_percent(self) -> None:
+        now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
+        alerts = [
+            FiredAlert(
+                symbol="NVDA",
+                price=118.40,
+                prev_close=123.60,
+                pct_change=(118.40 - 123.60) / 123.60,
+                threshold_unit="usd",
+            )
+        ]
+        text = format_alert_message(alerts, now)
+        self.assertIn("NVDA   $118.40   −$5.20   (prev close $123.60)", text)
+        self.assertNotIn("%", text.split("\n")[2])
+
+    def test_usd_legs_marks_step(self) -> None:
+        now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
+        alerts = [
+            FiredAlert(
+                symbol="NVDA",
+                price=113.60,
+                prev_close=123.60,
+                pct_change=(113.60 - 123.60) / 123.60,
+                leg=2,
+                threshold_unit="usd",
+            )
+        ]
+        text = format_alert_message(alerts, now)
+        self.assertIn("−$10.00 (2nd leg)", text)
+
     def test_empty_alerts_is_empty_string(self) -> None:
         now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
         self.assertEqual(format_alert_message([], now), "")

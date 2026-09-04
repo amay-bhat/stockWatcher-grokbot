@@ -26,6 +26,7 @@ class FiredAlert:
     prev_close: float
     pct_change: float
     leg: int | None = None
+    threshold_unit: str = "pct"
 
 
 def require_telegram_env() -> tuple[str, str]:
@@ -152,9 +153,12 @@ def get_updates(
 
 
 def _format_row(alert: FiredAlert) -> str:
-    pct = _format_pct(alert.pct_change, alert.leg)
+    if (alert.threshold_unit or "pct").strip().lower() == "usd":
+        change = _format_usd_drop(alert.prev_close - alert.price, alert.leg)
+    else:
+        change = _format_pct(alert.pct_change, alert.leg)
     return (
-        f"{alert.symbol:<7}{_money(alert.price)}   {pct}   "
+        f"{alert.symbol:<7}{_money(alert.price)}   {change}   "
         f"(prev close {_money(alert.prev_close)})"
     )
 
@@ -168,6 +172,19 @@ def _format_pct(pct_change: float, leg: int | None) -> str:
     pct = pct_change * 100.0
     sign = "−" if pct < 0 else "+"
     text = f"{sign}{abs(pct):.1f}%"
+    if leg is not None:
+        text += f" ({_ordinal(leg)} leg)"
+    return text
+
+
+def _format_usd_drop(drop: float, leg: int | None) -> str:
+    """Dollar drop from previous close. `drop` is prev_close - price."""
+    if drop > 0:
+        text = f"−${drop:.2f}"
+    elif drop < 0:
+        text = f"+${abs(drop):.2f}"
+    else:
+        text = "$0.00"
     if leg is not None:
         text += f" ({_ordinal(leg)} leg)"
     return text
