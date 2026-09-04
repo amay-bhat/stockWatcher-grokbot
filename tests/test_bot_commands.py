@@ -6,6 +6,7 @@ from datetime import datetime
 import io
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -323,6 +324,31 @@ class TestRunBotLoop(CommandTestCase):
             code = run_bot(store=self.store, provider=self.provider, max_polls=1)
         self.assertEqual(code, 1)
         self.assertIn("TELEGRAM_BOT_TOKEN", stderr.getvalue())
+
+    def test_stop_event_exits_without_polling(self) -> None:
+        stop = threading.Event()
+        stop.set()
+        polled: list[int] = []
+
+        def fake_get_updates(**_kwargs):
+            polled.append(1)
+            return []
+
+        env = {
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_CHAT_ID": "42",
+            "FINNHUB_API_KEY": "k",
+        }
+        with patch.dict(os.environ, env, clear=False), patch("sys.stdout", io.StringIO()):
+            code = run_bot(
+                store=self.store,
+                provider=self.provider,
+                get_updates_fn=fake_get_updates,
+                send_fn=lambda _text: None,
+                stop=stop,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(polled, [])
 
 
 class TestCliBotFlag(unittest.TestCase):

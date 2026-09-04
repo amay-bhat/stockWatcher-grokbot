@@ -4,11 +4,34 @@ Awareness tool: fetch quotes and notify when a watchlist name drops versus previ
 
 **Non-goals:** no signals, trading, portfolio tracking, news, or web UI.
 
-## Run Milestone 1 (quote printer)
+## Run (Milestone 6 — production entry)
+
+Telegram commands and the market-hours scheduler run in one process. The scheduler fetches quotes every `CHECK_INTERVAL_MINUTES` (default 5) **only during the NYSE regular session** (9:30–16:00 America/New_York, trading days; 13:00 ET close on half-days). Outside those hours it sleeps until the next open — no price polling, no alerts.
 
 ```bash
 export FINNHUB_API_KEY=your_key
+export TELEGRAM_BOT_TOKEN=your_bot_token
+export TELEGRAM_CHAT_ID=your_chat_id
+export DATABASE_PATH=./data/watchlist.db
+# optional; default 5
+export CHECK_INTERVAL_MINUTES=5
+
 python -m src.main
+# same thing:
+python -m src.main --serve
+```
+
+Ctrl+C stops both the bot and the scheduler.
+
+Gap-down at the open: the first cycle after 9:30 ET uses a fresh `day_key` (the ET date of that session), so a name that is already through its threshold alerts once.
+
+A quote/check failure is logged and that cycle is skipped (the process stays up). Three consecutive failed open cycles send a one-line Telegram warning, then the streak resets.
+
+## Milestone 1 — quote printer
+
+```bash
+export FINNHUB_API_KEY=your_key
+python -m src.main --quotes
 ```
 
 Prints one line per demo ticker (`NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL`):
@@ -30,7 +53,7 @@ python3 -m unittest discover -s tests
 
 ## Milestone 3 — Telegram outbound
 
-`--check` evaluates the watchlist and, if anything fires, sends **one batched Telegram message**. Inbound commands are M5.
+`--check` evaluates the watchlist and, if anything fires, sends **one batched Telegram message**. Inbound commands are M5. The scheduler (M6) reuses this same check cycle.
 
 ### Create a bot and get a chat id
 
@@ -54,11 +77,13 @@ python -m src.main --check
 python -m src.check_once
 ```
 
-If nothing is down enough, stdout is `no alerts`. If something fires, stdout prints `sent:` plus the message body. Missing `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` is a hard error (nothing is sent). Default `python -m src.main` is still the quote printer and does not need Telegram.
+If nothing is down enough, stdout is `no alerts`. If something fires, stdout prints `sent:` plus the message body. Missing `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` is a hard error (nothing is sent). `--check` and `/check` are not gated on market hours.
 
 ## Milestone 5 — Telegram command listener
 
 The bot is the config UI. Long-poll `getUpdates` (stdlib urllib, no telegram library) and persist every mutation through `src/store.py`. Commands from any chat other than `TELEGRAM_CHAT_ID` are ignored silently. Tickers are normalized to uppercase. `/add` asks Finnhub for a quote and rejects unknown / zero / null symbols.
+
+Bot-only (no scheduler):
 
 ```bash
 export FINNHUB_API_KEY=your_key
@@ -71,7 +96,7 @@ python -m src.main --bot
 python -m src.bot
 ```
 
-Ctrl+C stops the listener. `--check` and the default quote printer are unchanged.
+Ctrl+C stops the listener. Prefer `python -m src.main` so commands keep working while the scheduler runs.
 
 | Command | Effect |
 | --- | --- |
@@ -109,25 +134,45 @@ I/O is in `src/store.py` (stdlib `sqlite3` only). `src/alerts.py` and `PriceProv
 
 On Fly later, point `DATABASE_PATH` at the mounted volume, e.g. `/data/watchlist.db` (M7).
 
+## Milestone 6 — market calendar + scheduler
+
+`src/calendar.py` implements the NYSE regular session with `zoneinfo` (`America/New_York`) and a computed holiday/half-day set (Good Friday via Computus, observed federal-style closures). No `exchange_calendars` / `pandas_market_calendars` dependency.
+
+- Regular session: `[09:30, 16:00)` ET on trading days
+- Half-days: `[09:30, 13:00)` ET (day after Thanksgiving; Christmas Eve when it is a weekday and not a full holiday; July 3 when that weekday is not already Independence Day observed)
+- Weekends and full holidays: closed
+- `day_key` is the ET calendar date of the session
+
+`src/scheduler.py` sleeps until the next open when closed, and otherwise runs `check_once` every `CHECK_INTERVAL_MINUTES`. Scheduler-only:
+
+```bash
+python -m src.scheduler
+```
+
+```bash
+python3 -m unittest tests.test_calendar tests.test_scheduler
+python3 -m unittest discover -s tests
+```
+
 ## Environment variables
 
 | Variable | Used in |
 | --- | --- |
 | `FINNHUB_API_KEY` | Quote fetch |
-| `TELEGRAM_BOT_TOKEN` | M3 send / M5 long-poll |
+| `TELEGRAM_BOT_TOKEN` | M3 send / M5 long-poll / M6 combined serve |
 | `TELEGRAM_CHAT_ID` | M3 send / M5 allowed chat (others ignored) |
 | `DEFAULT_THRESHOLD_PCT` | Seed default (default `3.0`); stored in SQLite after first run; `/default` updates the DB value |
 | `DATABASE_PATH` | M4 SQLite file (default `./data/watchlist.db`; Fly later `/data/watchlist.db`) |
-| `CHECK_INTERVAL_MINUTES` | later (scheduler stub) |
+| `CHECK_INTERVAL_MINUTES` | M6 scheduler interval while the regular session is open (default `5`) |
 
 ## Build order
 
-- **M1** — Finnhub `/quote` fetch; print current vs previous close.
+- **M1** — Finnhub `/quote` fetch; print current vs previous close (`--quotes`).
 - **M2** — Drop alerts vs previous close using a percent threshold (`once` / `legs` / `mute`).
 - **M3** — Telegram outbound for alerts.
 - **M4** — SQLite store for watchlist / last-seen state.
-- **M5** — Inbound Telegram commands (`/list`, `/add`, …) (this).
-- **M6** — Periodic scheduler + market calendar (skip closed sessions).
+- **M5** — Inbound Telegram commands (`/list`, `/add`, …).
+- **M6** — Periodic scheduler + market calendar (this). Combined process: `python -m src.main`.
 - **M7** — Deploy on Fly.io with a SQLite volume.
 
-Deploy is not part of M5. No scheduler daemon here — that is M6. Host later: Fly.io + SQLite volume.
+Deploy is not part of M6 (`fly.toml` / Dockerfile / volume mount are M7). Host later: Fly.io + SQLite volume.

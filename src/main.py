@@ -1,4 +1,4 @@
-"""CLI: quote printer (default), `--check`, or `--bot` Telegram command listener."""
+"""CLI: combined serve (default), `--check`, `--bot`, or `--quotes`."""
 
 from __future__ import annotations
 
@@ -54,9 +54,17 @@ def print_quotes() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Watchlist Drop Alerts — quote printer, one-shot check, or Telegram bot.",
+        description=(
+            "Watchlist Drop Alerts — scheduler + Telegram bot (default), "
+            "one-shot check, bot-only, or quote printer."
+        ),
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run Telegram commands and the market-hours scheduler together (default)",
+    )
     mode.add_argument(
         "--check",
         action="store_true",
@@ -65,7 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--bot",
         action="store_true",
-        help="Long-poll Telegram for inbound watchlist commands",
+        help="Long-poll Telegram for inbound watchlist commands only",
+    )
+    mode.add_argument(
+        "--quotes",
+        action="store_true",
+        help="Print current vs previous close for the seed tickers (M1)",
     )
     args = parser.parse_args(argv)
     if args.check:
@@ -76,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         from src.bot_commands import run_bot
 
         return run_bot()
-    return print_quotes()
+    if args.quotes:
+        return print_quotes()
+    from src.scheduler import run_serve
+
+    return run_serve()
 
 
 if __name__ == "__main__":
