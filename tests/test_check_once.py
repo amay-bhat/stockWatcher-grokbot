@@ -127,6 +127,44 @@ class TestEvaluateWatchlist(unittest.TestCase):
         fired = evaluate_watchlist(quotes, configs, day_key="2026-09-04", states={})
         self.assertEqual([row.symbol for row in fired], ["NVDA"])
         self.assertEqual(fired[0].threshold_unit, "usd")
+        self.assertEqual(fired[0].side, "down")
+
+    def test_up_threshold_fires_on_rise(self) -> None:
+        quotes = {
+            "NVDA": Quote(price=103.0, prev_close=100.0),
+            "AMD": Quote(price=97.0, prev_close=100.0),
+        }
+        configs = [
+            TickerConfig(symbol="NVDA", threshold_pct=3.0, mode="once", direction="up"),
+            TickerConfig(symbol="AMD", threshold_pct=3.0, mode="once", direction="up"),
+        ]
+        fired = evaluate_watchlist(quotes, configs, day_key="2026-09-04", states={})
+        self.assertEqual([row.symbol for row in fired], ["NVDA"])
+        self.assertEqual(fired[0].side, "up")
+
+    def test_both_can_fire_down_then_up(self) -> None:
+        configs = [
+            TickerConfig(
+                symbol="NVDA", threshold_pct=3.0, mode="once", direction="both"
+            )
+        ]
+        states: dict[str, AlertState] = {}
+        down = evaluate_watchlist(
+            {"NVDA": Quote(price=97.0, prev_close=100.0)},
+            configs,
+            day_key="2026-09-04",
+            states=states,
+        )
+        up = evaluate_watchlist(
+            {"NVDA": Quote(price=103.0, prev_close=100.0)},
+            configs,
+            day_key="2026-09-04",
+            states=states,
+        )
+        self.assertEqual(down[0].side, "down")
+        self.assertEqual(up[0].side, "up")
+        self.assertTrue(states["NVDA"].fired)
+        self.assertTrue(states["NVDA"].fired_up)
 
 
 class TestQuotesFromRaw(unittest.TestCase):
@@ -308,6 +346,28 @@ class TestRunCheck(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn("−$5.20", sent[0])
         self.assertNotIn("−4.2%", sent[0])
+
+    def test_up_store_config_sends_rise_message(self) -> None:
+        store = self._store()
+        store.upsert_ticker("NVDA", direction="up")
+        sent: list[str] = []
+        with patch("sys.stdout", io.StringIO()):
+            code = run_check(
+                provider=FakeProvider(
+                    self._quotes(NVDA={"price": 103.10, "prev_close": 100.0})
+                ),
+                sender=sent.append,
+                now=datetime(2026, 9, 4, 10, 45, tzinfo=ET),
+                store=store,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Watchlist rise", sent[0])
+        self.assertIn("+3.1%", sent[0])
+        saved = Store(self.path).get_alert_state("NVDA", "2026-09-04")
+        assert saved is not None
+        self.assertTrue(saved.fired_up)
+        self.assertFalse(saved.fired)
 
     def test_failed_send_does_not_persist_fired_state(self) -> None:
         def boom(_text: str) -> None:

@@ -20,16 +20,27 @@ if TYPE_CHECKING:
     from src.provider import PriceProvider
 
 HELP_TEXT = """Watchlist commands:
-/list — tickers, thresholds, modes
-/add TICKER [pct|$5] — add (validates via Finnhub)
+/list — tickers, thresholds, modes, direction
+/add TICKER [pct|$5] [up|down|both] — add (validates via Finnhub)
 /remove TICKER
-/set TICKER 5%|$5 — percent or dollar drop from prev close
+/set TICKER 5%|$5 [up|down|both] — percent or dollar move from prev close
+/set TICKER up|down|both — alert on drops, rises, or both
 /mode TICKER once|legs|mute
 /mute TICKER
 /status — price and % change
 /check — poll now
 /default pct — global default percent threshold
 /help"""
+
+DIRECTION_WORDS = {
+    "up": "up",
+    "rise": "up",
+    "down": "down",
+    "drop": "down",
+    "both": "both",
+}
+_ADD_USAGE = "usage: /add TICKER [pct|$5] [up|down|both]"
+_SET_USAGE = "usage: /set TICKER 5%|$5 [up|down|both]"
 
 
 @dataclass
@@ -180,37 +191,38 @@ def cmd_list(_args: Sequence[str], deps: BotDeps) -> str:
 
 def cmd_add(args: Sequence[str], deps: BotDeps) -> str:
     if not args:
-        return "usage: /add TICKER [pct|$5]"
+        return _ADD_USAGE
     symbol = _normalize_ticker(args[0])
     if not symbol:
-        return "usage: /add TICKER [pct|$5]"
-    parsed: ParsedThreshold | None = None
-    if len(args) >= 2:
-        try:
-            parsed = parse_threshold(args[1])
-        except ValueError as exc:
-            return str(exc)
+        return _ADD_USAGE
+    try:
+        parsed, direction = _parse_threshold_and_direction(args[1:])
+    except ValueError as exc:
+        return str(exc)
 
     if not _finnhub_symbol_ok(deps.provider, symbol):
         return f"unknown symbol: {symbol}"
 
     existing = deps.store.get_ticker(symbol)
     mode = existing.mode if existing is not None else "once"
+    kwargs: dict = {"mode": mode}
+    if direction is not None:
+        kwargs["direction"] = direction
     if parsed is None:
-        config = deps.store.upsert_ticker(symbol, mode=mode)
+        config = deps.store.upsert_ticker(symbol, **kwargs)
     elif parsed.unit == "usd":
         config = deps.store.upsert_ticker(
             symbol,
-            mode=mode,
             threshold_unit="usd",
             threshold_usd=parsed.value,
+            **kwargs,
         )
     else:
         config = deps.store.upsert_ticker(
             symbol,
             threshold_pct=parsed.value,
-            mode=mode,
             threshold_unit="pct",
+            **kwargs,
         )
     return _format_ticker(config)
 
@@ -229,17 +241,31 @@ def cmd_remove(args: Sequence[str], deps: BotDeps) -> str:
 
 def cmd_set(args: Sequence[str], deps: BotDeps) -> str:
     if len(args) < 2:
-        return "usage: /set TICKER 5%|$5"
+        return _SET_USAGE
     symbol = _normalize_ticker(args[0])
     if not symbol:
-        return "usage: /set TICKER 5%|$5"
+        return _SET_USAGE
     existing = deps.store.get_ticker(symbol)
     if existing is None:
         return f"{symbol} is not on the watchlist"
     raw = args[1].strip()
+    direction_only = parse_direction(raw)
+    if direction_only is not None:
+        if len(args) > 2:
+            return _SET_USAGE
+        config = deps.store.upsert_ticker(symbol, direction=direction_only)
+        return _format_ticker(config)
+    extra_direction: str | None = None
+    if len(args) >= 3:
+        extra_direction = parse_direction(args[2])
+        if extra_direction is None or len(args) > 3:
+            return "direction must be up, down, or both"
     if raw.lower() == "pct":
         config = deps.store.upsert_ticker(
-            symbol, mode=existing.mode, threshold_unit="pct"
+            symbol,
+            mode=existing.mode,
+            threshold_unit="pct",
+            direction=extra_direction,
         )
         return _format_ticker(config)
     try:
@@ -252,6 +278,7 @@ def cmd_set(args: Sequence[str], deps: BotDeps) -> str:
             mode=existing.mode,
             threshold_unit="usd",
             threshold_usd=parsed.value,
+            direction=extra_direction,
         )
     else:
         config = deps.store.upsert_ticker(
@@ -259,6 +286,7 @@ def cmd_set(args: Sequence[str], deps: BotDeps) -> str:
             threshold_pct=parsed.value,
             mode=existing.mode,
             threshold_unit="pct",
+            direction=extra_direction,
         )
     return _format_ticker(config)
 
@@ -338,6 +366,31 @@ def _normalize_ticker(raw: str) -> str:
     return (raw or "").strip().upper()
 
 
+def parse_direction(raw: str) -> str | None:
+    """Parse `up`/`rise`, `down`/`drop`, or `both`. None if not a direction word."""
+    return DIRECTION_WORDS.get((raw or "").strip().lower())
+
+
+def _parse_threshold_and_direction(
+    extras: Sequence[str],
+) -> tuple[ParsedThreshold | None, str | None]:
+    """Parse optional `[pct|$5] [up|down|both]` after a ticker."""
+    if not extras:
+        return None, None
+    direction = parse_direction(extras[0])
+    if direction is not None:
+        if len(extras) > 1:
+            raise ValueError(_ADD_USAGE)
+        return None, direction
+    parsed = parse_threshold(extras[0])
+    if len(extras) == 1:
+        return parsed, None
+    direction = parse_direction(extras[1])
+    if direction is None or len(extras) > 2:
+        raise ValueError("direction must be up, down, or both")
+    return parsed, direction
+
+
 def parse_threshold(raw: str) -> ParsedThreshold:
     """Parse `5`, `5%` (pct) or `$5`, `5usd` (usd). Bare numbers stay pct."""
     text = (raw or "").strip().lower().replace(" ", "")
@@ -395,11 +448,15 @@ def _format_pct(value: float) -> str:
 
 
 def _format_ticker(config: TickerConfig) -> str:
+    direction = config.direction or "down"
     if config.threshold_unit == "usd":
         usd = config.threshold_usd
         amount = _format_pct(usd) if usd is not None else "?"
-        return f"{config.symbol}  ${amount}  {config.mode}"
-    return f"{config.symbol}  {_format_pct(config.threshold_pct)}%  {config.mode}"
+        return f"{config.symbol}  ${amount}  {config.mode}  {direction}"
+    return (
+        f"{config.symbol}  {_format_pct(config.threshold_pct)}%  "
+        f"{config.mode}  {direction}"
+    )
 
 
 def _format_status_line(ticker: str, quote: dict[str, float | None] | None) -> str:

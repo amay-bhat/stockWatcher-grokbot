@@ -157,7 +157,7 @@ class TestListHelpUnknown(CommandTestCase):
 class TestMutatingCommands(CommandTestCase):
     def test_add_validates_and_persists_uppercase(self) -> None:
         reply = self._ask("/add tsla")
-        self.assertEqual(reply, "TSLA  3%  once")
+        self.assertEqual(reply, "TSLA  3%  once  down")
         row = Store(self.path).get_ticker("TSLA")
         assert row is not None
         self.assertEqual(row.threshold_pct, 3.0)
@@ -165,7 +165,7 @@ class TestMutatingCommands(CommandTestCase):
         self.assertEqual(self.provider.requested[-1], ["TSLA"])
 
     def test_add_optional_threshold(self) -> None:
-        self.assertEqual(self._ask("/add META 2.5"), "META  2.5%  once")
+        self.assertEqual(self._ask("/add META 2.5"), "META  2.5%  once  down")
         row = self.store.get_ticker("META")
         assert row is not None
         self.assertEqual(row.threshold_pct, 2.5)
@@ -179,17 +179,17 @@ class TestMutatingCommands(CommandTestCase):
 
     def test_add_existing_keeps_mode_when_threshold_changes(self) -> None:
         self.store.upsert_ticker("NVDA", threshold_pct=3.0, mode="legs")
-        self.assertEqual(self._ask("/add NVDA 4"), "NVDA  4%  legs")
+        self.assertEqual(self._ask("/add NVDA 4"), "NVDA  4%  legs  down")
         row = self.store.get_ticker("NVDA")
         assert row is not None
         self.assertEqual(row.mode, "legs")
 
     def test_add_usage(self) -> None:
-        self.assertEqual(self._ask("/add"), "usage: /add TICKER [pct|$5]")
+        self.assertEqual(self._ask("/add"), "usage: /add TICKER [pct|$5] [up|down|both]")
         self.assertEqual(self._ask("/add NVDA 0"), "pct must be a positive number")
 
     def test_add_dollar_threshold(self) -> None:
-        self.assertEqual(self._ask("/add META $5"), "META  $5  once")
+        self.assertEqual(self._ask("/add META $5"), "META  $5  once  down")
         row = self.store.get_ticker("META")
         assert row is not None
         self.assertEqual(row.threshold_unit, "usd")
@@ -197,8 +197,8 @@ class TestMutatingCommands(CommandTestCase):
         self.assertEqual(row.threshold_pct, 3.0)
 
     def test_add_usd_suffix(self) -> None:
-        self.assertEqual(self._ask("/add META 5usd"), "META  $5  once")
-        self.assertEqual(self._ask("/add META 2.5USD"), "META  $2.5  once")
+        self.assertEqual(self._ask("/add META 5usd"), "META  $5  once  down")
+        self.assertEqual(self._ask("/add META 2.5USD"), "META  $2.5  once  down")
         row = self.store.get_ticker("META")
         assert row is not None
         self.assertEqual(row.threshold_usd, 2.5)
@@ -210,7 +210,7 @@ class TestMutatingCommands(CommandTestCase):
 
     def test_add_existing_keeps_mode_when_switching_to_usd(self) -> None:
         self.store.upsert_ticker("NVDA", threshold_pct=3.0, mode="legs")
-        self.assertEqual(self._ask("/add NVDA $5"), "NVDA  $5  legs")
+        self.assertEqual(self._ask("/add NVDA $5"), "NVDA  $5  legs  down")
         row = self.store.get_ticker("NVDA")
         assert row is not None
         self.assertEqual(row.mode, "legs")
@@ -218,12 +218,12 @@ class TestMutatingCommands(CommandTestCase):
 
     def test_add_without_threshold_keeps_usd(self) -> None:
         self.store.upsert_ticker("NVDA", threshold_unit="usd", threshold_usd=5.0)
-        self.assertEqual(self._ask("/add NVDA"), "NVDA  $5  once")
+        self.assertEqual(self._ask("/add NVDA"), "NVDA  $5  once  down")
         self.assertEqual(self.store.get_ticker("NVDA").threshold_unit, "usd")
 
     def test_add_bare_number_switches_usd_back_to_pct(self) -> None:
         self.store.upsert_ticker("NVDA", threshold_unit="usd", threshold_usd=5.0)
-        self.assertEqual(self._ask("/add NVDA 4"), "NVDA  4%  once")
+        self.assertEqual(self._ask("/add NVDA 4"), "NVDA  4%  once  down")
         self.assertEqual(self.store.get_ticker("NVDA").threshold_unit, "pct")
 
     def test_remove_and_missing(self) -> None:
@@ -233,24 +233,24 @@ class TestMutatingCommands(CommandTestCase):
         self.assertEqual(self._ask("/remove"), "usage: /remove TICKER")
 
     def test_set_threshold(self) -> None:
-        self.assertEqual(self._ask("/set nvda 2.5"), "NVDA  2.5%  once")
+        self.assertEqual(self._ask("/set nvda 2.5"), "NVDA  2.5%  once  down")
         row = self.store.get_ticker("NVDA")
         assert row is not None
         self.assertEqual(row.threshold_pct, 2.5)
         self.assertEqual(row.threshold_unit, "pct")
         self.assertEqual(self._ask("/set ZZZZ 2"), "ZZZZ is not on the watchlist")
-        self.assertEqual(self._ask("/set NVDA"), "usage: /set TICKER 5%|$5")
+        self.assertEqual(self._ask("/set NVDA"), "usage: /set TICKER 5%|$5 [up|down|both]")
 
     def test_set_dollar_and_switch_back_to_pct(self) -> None:
-        self.assertEqual(self._ask("/set nvda $5"), "NVDA  $5  once")
+        self.assertEqual(self._ask("/set nvda $5"), "NVDA  $5  once  down")
         row = self.store.get_ticker("NVDA")
         assert row is not None
         self.assertEqual(row.threshold_unit, "usd")
         self.assertEqual(row.threshold_usd, 5.0)
-        self.assertEqual(self._ask("/set NVDA 5%"), "NVDA  5%  once")
+        self.assertEqual(self._ask("/set NVDA 5%"), "NVDA  5%  once  down")
         self.assertEqual(self.store.get_ticker("NVDA").threshold_unit, "pct")
-        self.assertEqual(self._ask("/set NVDA $7.5"), "NVDA  $7.5  once")
-        self.assertEqual(self._ask("/set NVDA pct"), "NVDA  5%  once")
+        self.assertEqual(self._ask("/set NVDA $7.5"), "NVDA  $7.5  once  down")
+        self.assertEqual(self._ask("/set NVDA pct"), "NVDA  5%  once  down")
         self.assertEqual(self.store.get_ticker("NVDA").threshold_unit, "pct")
 
     def test_list_shows_usd_unit(self) -> None:
@@ -262,22 +262,71 @@ class TestMutatingCommands(CommandTestCase):
 
     def test_mode_preserves_usd_threshold(self) -> None:
         self.store.upsert_ticker("NVDA", threshold_unit="usd", threshold_usd=5.0)
-        self.assertEqual(self._ask("/mode nvda legs"), "NVDA  $5  legs")
-        self.assertEqual(self._ask("/mute nvda"), "NVDA  $5  mute")
+        self.assertEqual(self._ask("/mode nvda legs"), "NVDA  $5  legs  down")
+        self.assertEqual(self._ask("/mute nvda"), "NVDA  $5  mute  down")
 
     def test_mode_and_mute(self) -> None:
-        self.assertEqual(self._ask("/mode nvda legs"), "NVDA  3%  legs")
+        self.assertEqual(self._ask("/mode nvda legs"), "NVDA  3%  legs  down")
         self.assertEqual(self.store.get_ticker("NVDA").mode, "legs")
-        self.assertEqual(self._ask("/mute nvda"), "NVDA  3%  mute")
+        self.assertEqual(self._ask("/mute nvda"), "NVDA  3%  mute  down")
         self.assertEqual(self.store.get_ticker("NVDA").mode, "mute")
         self.assertEqual(self._ask("/mode NVDA nope"), "mode must be once, legs, or mute")
         self.assertEqual(self._ask("/mode"), "usage: /mode TICKER once|legs|mute")
         self.assertEqual(self._ask("/mode ZZZZ once"), "ZZZZ is not on the watchlist")
 
+    def test_add_direction_up_and_rise_alias(self) -> None:
+        self.assertEqual(self._ask("/add META 3% up"), "META  3%  once  up")
+        self.assertEqual(self.store.get_ticker("META").direction, "up")
+        self.assertEqual(self._ask("/add TSLA $5 rise"), "TSLA  $5  once  up")
+        self.assertEqual(self.store.get_ticker("TSLA").direction, "up")
+
+    def test_add_direction_only_uses_default_threshold(self) -> None:
+        self.assertEqual(self._ask("/add META both"), "META  3%  once  both")
+        self.assertEqual(self.store.get_ticker("META").direction, "both")
+
+    def test_add_existing_preserves_direction_unless_set(self) -> None:
+        self.store.upsert_ticker("NVDA", direction="up")
+        self.assertEqual(self._ask("/add NVDA 4"), "NVDA  4%  once  up")
+        self.assertEqual(self._ask("/add NVDA 5% down"), "NVDA  5%  once  down")
+
+    def test_add_rejects_unknown_direction(self) -> None:
+        self.assertEqual(
+            self._ask("/add META 3% sideways"),
+            "direction must be up, down, or both",
+        )
+        self.assertIsNone(self.store.get_ticker("META"))
+
+    def test_set_direction_only(self) -> None:
+        self.assertEqual(self._ask("/set nvda up"), "NVDA  3%  once  up")
+        self.assertEqual(self.store.get_ticker("NVDA").direction, "up")
+        self.assertEqual(self._ask("/set NVDA both"), "NVDA  3%  once  both")
+        self.assertEqual(self._ask("/set NVDA down"), "NVDA  3%  once  down")
+        self.assertEqual(self._ask("/set NVDA rise"), "NVDA  3%  once  up")
+
+    def test_set_threshold_and_direction_together(self) -> None:
+        self.assertEqual(self._ask("/set nvda 5% up"), "NVDA  5%  once  up")
+        self.assertEqual(self._ask("/set NVDA $7 both"), "NVDA  $7  once  both")
+        self.assertEqual(self.store.get_ticker("NVDA").direction, "both")
+        self.assertEqual(self.store.get_ticker("NVDA").threshold_usd, 7.0)
+
+    def test_set_threshold_preserves_direction(self) -> None:
+        self.store.upsert_ticker("NVDA", direction="up")
+        self.assertEqual(self._ask("/set NVDA 4"), "NVDA  4%  once  up")
+        self.assertEqual(self._ask("/mode nvda legs"), "NVDA  4%  legs  up")
+
+    def test_list_shows_direction(self) -> None:
+        self.store.upsert_ticker("NVDA", direction="up")
+        self.store.upsert_ticker("AMD", direction="both")
+        text = self._ask("/list")
+        assert text is not None
+        self.assertIn("NVDA  3%  once  up", text)
+        self.assertIn("AMD  3%  once  both", text)
+        self.assertIn("AAPL  3%  once  down", text)
+
     def test_default_persists(self) -> None:
         self.assertEqual(self._ask("/default 4"), "default  4%")
         self.assertEqual(Store(self.path).get_default_threshold_pct(), 4.0)
-        self.assertEqual(self._ask("/add META"), "META  4%  once")
+        self.assertEqual(self._ask("/add META"), "META  4%  once  down")
         self.assertEqual(self._ask("/default"), "usage: /default pct")
         self.assertEqual(self._ask("/default -1"), "pct must be a positive number")
 
