@@ -96,6 +96,60 @@ class TestFormatAlertMessage(unittest.TestCase):
         text = format_alert_message(alerts, now)
         self.assertIn("−$10.00 (2nd leg)", text)
 
+    def test_rise_header_and_plus_signs(self) -> None:
+        now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
+        alerts = [
+            FiredAlert(
+                symbol="NVDA",
+                price=127.40,
+                prev_close=123.60,
+                pct_change=(127.40 - 123.60) / 123.60,
+                side="up",
+            )
+        ]
+        text = format_alert_message(alerts, now)
+        self.assertTrue(text.startswith("📈 Watchlist rise"))
+        self.assertIn("NVDA   $127.40   +3.1%   (prev close $123.60)", text)
+        self.assertNotIn("Watchlist drop", text)
+
+    def test_usd_rise_shows_plus_dollars(self) -> None:
+        now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
+        alerts = [
+            FiredAlert(
+                symbol="NVDA",
+                price=128.80,
+                prev_close=123.60,
+                pct_change=(128.80 - 123.60) / 123.60,
+                threshold_unit="usd",
+                side="up",
+            )
+        ]
+        text = format_alert_message(alerts, now)
+        self.assertIn("NVDA   $128.80   +$5.20   (prev close $123.60)", text)
+
+    def test_mixed_batch_uses_neutral_header(self) -> None:
+        now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
+        alerts = [
+            FiredAlert(
+                symbol="NVDA",
+                price=118.40,
+                prev_close=123.60,
+                pct_change=(118.40 - 123.60) / 123.60,
+                side="down",
+            ),
+            FiredAlert(
+                symbol="AMD",
+                price=98.15,
+                prev_close=95.10,
+                pct_change=(98.15 - 95.10) / 95.10,
+                side="up",
+            ),
+        ]
+        text = format_alert_message(alerts, now)
+        self.assertTrue(text.startswith("Watchlist move"))
+        self.assertIn("−4.2%", text)
+        self.assertIn("+3.2%", text)
+
     def test_empty_alerts_is_empty_string(self) -> None:
         now = datetime(2026, 9, 4, 10, 45, tzinfo=ET)
         self.assertEqual(format_alert_message([], now), "")

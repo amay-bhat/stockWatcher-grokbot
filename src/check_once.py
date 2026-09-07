@@ -65,6 +65,7 @@ def evaluate_watchlist(
                 pct_change=decision.pct_change,
                 leg=decision.leg,
                 threshold_unit=config.threshold_unit,
+                side=decision.side or "down",
             )
         )
     return fired

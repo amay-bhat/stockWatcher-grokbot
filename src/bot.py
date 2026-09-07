@@ -19,7 +19,7 @@ USER_AGENT = "stockWatcher-grokbot/m5"
 
 @dataclass(frozen=True)
 class FiredAlert:
-    """One ticker that crossed its drop threshold this check."""
+    """One ticker that crossed its drop or rise threshold this check."""
 
     symbol: str
     price: float
@@ -27,6 +27,7 @@ class FiredAlert:
     pct_change: float
     leg: int | None = None
     threshold_unit: str = "pct"
+    side: str = "down"
 
 
 def require_telegram_env() -> tuple[str, str]:
@@ -46,10 +47,10 @@ def require_telegram_env() -> tuple[str, str]:
 
 
 def format_alert_message(alerts: Sequence[FiredAlert], now: datetime) -> str:
-    """Build one batched watchlist-drop message (flat, factual)."""
+    """Build one batched watchlist message (flat, factual). Mixes drops and rises."""
     if not alerts:
         return ""
-    lines = ["📉 Watchlist drop", ""]
+    lines = [_batch_header(alerts), ""]
     for alert in alerts:
         lines.append(_format_row(alert))
     lines.append("")
@@ -150,6 +151,20 @@ def get_updates(
     if not isinstance(result, list):
         return []
     return [item for item in result if isinstance(item, dict)]
+
+
+def _alert_side(alert: FiredAlert) -> str:
+    side = (alert.side or "down").strip().lower()
+    return "up" if side == "up" else "down"
+
+
+def _batch_header(alerts: Sequence[FiredAlert]) -> str:
+    sides = {_alert_side(alert) for alert in alerts}
+    if sides == {"up"}:
+        return "📈 Watchlist rise"
+    if sides == {"down"}:
+        return "📉 Watchlist drop"
+    return "Watchlist move"
 
 
 def _format_row(alert: FiredAlert) -> str:

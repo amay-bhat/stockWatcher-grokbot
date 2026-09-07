@@ -56,6 +56,7 @@ class TestStoreSeed(StoreTestCase):
             self.assertEqual(row.threshold_pct, DEFAULT_THRESHOLD_PCT)
             self.assertEqual(row.threshold_unit, "pct")
             self.assertIsNone(row.threshold_usd)
+            self.assertEqual(row.direction, "down")
 
     def test_seed_uses_env_threshold(self) -> None:
         with patch.dict(os.environ, {"DEFAULT_THRESHOLD_PCT": "2.5"}):
@@ -115,6 +116,7 @@ class TestStoreWatchlist(StoreTestCase):
         self.assertEqual(row.mode, "once")
         self.assertEqual(row.threshold_unit, "pct")
         self.assertIsNone(row.threshold_usd)
+        self.assertEqual(row.direction, "down")
 
     def test_unknown_mode_falls_back_to_once(self) -> None:
         row = self._store().upsert_ticker("AMD", threshold_pct=3.0, mode="nope")
@@ -154,6 +156,30 @@ class TestStoreWatchlist(StoreTestCase):
         self.assertEqual(switched.threshold_pct, 2.5)
         self.assertEqual(switched.mode, "legs")
         self.assertEqual(switched.threshold_usd, 5.0)
+        self.assertEqual(switched.direction, "down")
+
+    def test_upsert_direction_round_trip(self) -> None:
+        store = self._store()
+        created = store.upsert_ticker("NVDA", direction="up")
+        self.assertEqual(created.direction, "up")
+        self.assertEqual(Store(self.path).get_ticker("NVDA").direction, "up")
+
+        both = store.upsert_ticker("NVDA", direction="both")
+        self.assertEqual(both.direction, "both")
+        self.assertEqual(both.threshold_pct, DEFAULT_THRESHOLD_PCT)
+
+        rise = store.upsert_ticker("META", direction="rise")
+        self.assertEqual(rise.direction, "up")
+
+        unknown = store.upsert_ticker("AMD", direction="sideways")
+        self.assertEqual(unknown.direction, "down")
+
+    def test_mode_update_preserves_direction(self) -> None:
+        store = self._store()
+        store.upsert_ticker("NVDA", direction="up")
+        updated = store.upsert_ticker("NVDA", mode="legs")
+        self.assertEqual(updated.direction, "up")
+        self.assertEqual(updated.mode, "legs")
 
     def test_mode_update_preserves_usd_unit(self) -> None:
         store = self._store()
@@ -203,7 +229,55 @@ class TestStoreWatchlist(StoreTestCase):
         self.assertEqual(row.threshold_unit, "pct")
         self.assertIsNone(row.threshold_usd)
         self.assertEqual(row.threshold_pct, 3.0)
+        self.assertEqual(row.direction, "down")
         self.assertEqual([item.symbol for item in store.get_watchlist()], ["NVDA"])
+
+    def test_migrates_legacy_alert_state_without_up_columns(self) -> None:
+        with sqlite3.connect(self.path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE watchlist (
+                    symbol TEXT PRIMARY KEY,
+                    threshold_pct REAL NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'once',
+                    threshold_unit TEXT NOT NULL DEFAULT 'pct',
+                    threshold_usd REAL
+                );
+                CREATE TABLE alert_state (
+                    symbol TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    fired INTEGER NOT NULL DEFAULT 0,
+                    last_leg INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (symbol, day_key)
+                );
+                INSERT INTO settings (key, value) VALUES ('seeded', '1');
+                INSERT INTO settings (key, value)
+                    VALUES ('default_threshold_pct', '3.0');
+                INSERT INTO watchlist (symbol, threshold_pct, mode)
+                    VALUES ('NVDA', 3.0, 'once');
+                INSERT INTO alert_state (symbol, day_key, fired, last_leg)
+                    VALUES ('NVDA', '2026-09-04', 1, 2);
+                """
+            )
+        store = Store(self.path)
+        row = store.get_ticker("NVDA")
+        assert row is not None
+        self.assertEqual(row.direction, "down")
+        state = store.get_alert_state("NVDA", "2026-09-04")
+        self.assertEqual(
+            state,
+            AlertState(
+                day_key="2026-09-04",
+                fired=True,
+                last_leg=2,
+                fired_up=False,
+                last_leg_up=0,
+            ),
+        )
 
 
 class TestStoreAlertState(StoreTestCase):
@@ -212,7 +286,13 @@ class TestStoreAlertState(StoreTestCase):
 
     def test_round_trip_state(self) -> None:
         store = self._store()
-        state = AlertState(day_key="2026-09-04", fired=True, last_leg=2)
+        state = AlertState(
+            day_key="2026-09-04",
+            fired=True,
+            last_leg=2,
+            fired_up=True,
+            last_leg_up=1,
+        )
         store.save_alert_state("nvda", state)
         loaded = store.get_alert_state("NVDA", "2026-09-04")
         self.assertEqual(loaded, state)

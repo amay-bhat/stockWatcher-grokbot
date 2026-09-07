@@ -44,7 +44,7 @@ Null or zero prices are skipped (no fake -100% moves). `config.example.json` is 
 
 ## Tests (Milestone 2)
 
-Alert decisions live in `src/alerts.py` as pure functions (no I/O, no clock). Baseline is previous close. Each ticker has a unit: **`pct` (default)** fires when the drop is at least `threshold_pct`; **`usd`** fires when `prev_close - price` is at least `threshold_usd` dollars. Modes: `once` (first cross only), `legs` (again each extra full step down — 1×, 2×, 3× the same percent or dollar amount), `mute` (never). Daily reset is the caller-supplied `day_key`.
+Alert decisions live in `src/alerts.py` as pure functions (no I/O, no clock). Baseline is previous close. Each ticker has a unit: **`pct` (default)** fires when the move is at least `threshold_pct`; **`usd`** fires when the dollar move is at least `threshold_usd`. Direction: **`down` (default)** on drops, **`up`** on rises, **`both`** independently. Modes: `once` (first cross only), `legs` (again each extra full step — 1×, 2×, 3× the same percent or dollar amount; rise legs never fire on a bounce back down), `mute` (never). Daily reset is the caller-supplied `day_key`. Down and up memory are separate (`fired`/`last_leg` vs `fired_up`/`last_leg_up`) so a `both` ticker can fire once each way the same day.
 
 ```bash
 python3 -m unittest tests.test_alerts
@@ -100,10 +100,11 @@ Ctrl+C stops the listener. Prefer `python -m src.main` so commands keep working 
 
 | Command | Effect |
 | --- | --- |
-| `/list` | Tickers with threshold and mode |
-| `/add TICKER [pct\|$5]` | Add (optional threshold, else stored default); Finnhub-validated. `$5` or `5usd` stores a dollar drop from previous close |
+| `/list` | Tickers with threshold, mode, and direction |
+| `/add TICKER [pct\|$5] [up\|down\|both]` | Add (optional threshold, else stored default); Finnhub-validated. `$5` or `5usd` is dollars from previous close. Optional `up`/`rise`, `down`/`drop`, or `both` |
 | `/remove TICKER` | Remove |
-| `/set TICKER 5%\|$5` | Change threshold and unit (`5` / `5%` = percent; `$5` / `5usd` = dollars). `/set TICKER pct` switches back to the stored percent |
+| `/set TICKER 5%\|$5 [up\|down\|both]` | Change threshold and unit (`5` / `5%` = percent; `$5` / `5usd` = dollars). `/set TICKER pct` switches back to the stored percent |
+| `/set TICKER up\|down\|both` | Alert on rises, drops, or both (same threshold) |
 | `/mode TICKER once\|legs\|mute` | Change mode |
 | `/mute TICKER` | Shorthand for mode mute |
 | `/status` | Current price and % change |
@@ -111,9 +112,11 @@ Ctrl+C stops the listener. Prefer `python -m src.main` so commands keep working 
 | `/default pct` | Persist global default threshold |
 | `/help` | Command reference |
 
-Mutating commands reply with a one-line echo of the new state (e.g. `TSLA  3%  once` or `NVDA  $5  once`).
+Examples: `/add NVDA 3% up`, `/add NVDA $5 rise`, `/set NVDA both`, `/set NVDA down`.
 
-Dollar thresholds are still versus **previous close**, not cost basis. Existing SQLite rows migrate in place (`threshold_unit=pct`, `threshold_usd` null).
+Mutating commands reply with a one-line echo of the new state (e.g. `TSLA  3%  once  down` or `NVDA  $5  once  up`).
+
+Dollar thresholds are still versus **previous close**, not cost basis. Existing SQLite rows migrate in place (`threshold_unit=pct`, `threshold_usd` null, `direction=down`). Rise/drop memory columns (`fired_up`, `last_leg_up`) default to 0.
 
 ```bash
 python3 -m unittest tests.test_bot_commands tests.test_bot
@@ -124,7 +127,7 @@ python3 -m unittest discover -s tests
 
 Watchlist config and per-day alert state live in a local SQLite file so a process restart (or a mid-day redeploy) does **not** re-alert names that already fired this trading day.
 
-On first run / empty DB the store seeds `NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL` at `DEFAULT_THRESHOLD_PCT` (default `3.0`) with mode `once`. After that, ticker rows and `AlertState` (`day_key` / `fired` / `last_leg`) are loaded and written by `check_once`.
+On first run / empty DB the store seeds `NVDA`, `AMD`, `AAPL`, `MSFT`, `GOOGL` at `DEFAULT_THRESHOLD_PCT` (default `3.0`) with mode `once` and direction `down`. After that, ticker rows and `AlertState` (`day_key` / `fired` / `last_leg` / `fired_up` / `last_leg_up`) are loaded and written by `check_once`.
 
 ```bash
 export DATABASE_PATH=./data/watchlist.db

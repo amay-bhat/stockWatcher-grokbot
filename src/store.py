@@ -15,7 +15,16 @@ import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
-from src.alerts import VALID_MODES, VALID_UNITS, AlertMode, AlertState, TickerConfig, ThresholdUnit
+from src.alerts import (
+    VALID_DIRECTIONS,
+    VALID_MODES,
+    VALID_UNITS,
+    AlertDirection,
+    AlertMode,
+    AlertState,
+    TickerConfig,
+    ThresholdUnit,
+)
 
 DEFAULT_THRESHOLD_PCT = 3.0
 DEFAULT_DATABASE_PATH = "./data/watchlist.db"
@@ -23,7 +32,9 @@ SEED_TICKERS = ("NVDA", "AMD", "AAPL", "MSFT", "GOOGL")
 
 _SETTING_SEEDED = "seeded"
 _SETTING_DEFAULT_THRESHOLD = "default_threshold_pct"
-_WATCHLIST_COLS = "symbol, threshold_pct, mode, threshold_unit, threshold_usd"
+_WATCHLIST_COLS = (
+    "symbol, threshold_pct, mode, threshold_unit, threshold_usd, direction"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -36,7 +47,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     threshold_pct REAL NOT NULL,
     mode TEXT NOT NULL DEFAULT 'once',
     threshold_unit TEXT NOT NULL DEFAULT 'pct',
-    threshold_usd REAL
+    threshold_usd REAL,
+    direction TEXT NOT NULL DEFAULT 'down'
 );
 
 CREATE TABLE IF NOT EXISTS alert_state (
@@ -44,6 +56,8 @@ CREATE TABLE IF NOT EXISTS alert_state (
     day_key TEXT NOT NULL,
     fired INTEGER NOT NULL DEFAULT 0,
     last_leg INTEGER NOT NULL DEFAULT 0,
+    fired_up INTEGER NOT NULL DEFAULT 0,
+    last_leg_up INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (symbol, day_key)
 );
 """
@@ -105,6 +119,7 @@ class Store:
         mode: str | None = None,
         threshold_unit: str | None = None,
         threshold_usd: float | None = None,
+        direction: str | None = None,
     ) -> TickerConfig:
         normalized = _normalize_symbol(symbol)
         if not normalized:
@@ -129,6 +144,11 @@ class Store:
                 if threshold_usd is None
                 else _require_positive_threshold(threshold_usd, field="threshold_usd")
             )
+            alert_direction = (
+                existing.direction
+                if direction is None
+                else _normalize_direction(direction)
+            )
         else:
             threshold = (
                 self.get_default_threshold_pct()
@@ -142,22 +162,25 @@ class Store:
                 if threshold_usd is None
                 else _require_positive_threshold(threshold_usd, field="threshold_usd")
             )
+            alert_direction = _normalize_direction(direction or "down")
         if unit == "usd" and not _is_positive(usd):
             raise ValueError("threshold_usd must be a positive number")
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO watchlist (
-                    symbol, threshold_pct, mode, threshold_unit, threshold_usd
+                    symbol, threshold_pct, mode, threshold_unit, threshold_usd,
+                    direction
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     threshold_pct = excluded.threshold_pct,
                     mode = excluded.mode,
                     threshold_unit = excluded.threshold_unit,
-                    threshold_usd = excluded.threshold_usd
+                    threshold_usd = excluded.threshold_usd,
+                    direction = excluded.direction
                 """,
-                (normalized, threshold, alert_mode, unit, usd),
+                (normalized, threshold, alert_mode, unit, usd, alert_direction),
             )
         return TickerConfig(
             symbol=normalized,
@@ -165,6 +188,7 @@ class Store:
             mode=alert_mode,
             threshold_unit=unit,
             threshold_usd=usd,
+            direction=alert_direction,
         )
 
     def remove_ticker(self, symbol: str) -> bool:
@@ -183,7 +207,8 @@ class Store:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT day_key, fired, last_leg FROM alert_state
+                SELECT day_key, fired, last_leg, fired_up, last_leg_up
+                FROM alert_state
                 WHERE symbol = ? AND day_key = ?
                 """,
                 (normalized, day_key),
@@ -213,7 +238,8 @@ class Store:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT symbol, day_key, fired, last_leg FROM alert_state
+                SELECT symbol, day_key, fired, last_leg, fired_up, last_leg_up
+                FROM alert_state
                 WHERE day_key = ? AND symbol IN ({placeholders})
                 """,
                 (day_key, *normalized),
@@ -331,6 +357,17 @@ def _normalize_unit(unit: str) -> ThresholdUnit:
     return "pct"
 
 
+def _normalize_direction(direction: str) -> AlertDirection:
+    normalized = (direction or "down").strip().lower()
+    if normalized == "rise":
+        normalized = "up"
+    elif normalized == "drop":
+        normalized = "down"
+    if normalized in VALID_DIRECTIONS:
+        return normalized  # type: ignore[return-value]
+    return "down"
+
+
 def _is_positive(value: float | None) -> bool:
     return (
         isinstance(value, (int, float))
@@ -348,7 +385,7 @@ def _require_positive_threshold(value: float, field: str = "threshold_pct") -> f
 
 
 def _migrate_watchlist(conn: sqlite3.Connection) -> None:
-    """Add unit/usd columns to DBs created before dollar thresholds existed."""
+    """Add unit/usd/direction columns to DBs created before those fields existed."""
     cols = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()
     }
@@ -360,6 +397,28 @@ def _migrate_watchlist(conn: sqlite3.Connection) -> None:
         )
     if "threshold_usd" not in cols:
         conn.execute("ALTER TABLE watchlist ADD COLUMN threshold_usd REAL")
+    if "direction" not in cols:
+        conn.execute(
+            "ALTER TABLE watchlist ADD COLUMN direction TEXT NOT NULL DEFAULT 'down'"
+        )
+    _migrate_alert_state(conn)
+
+
+def _migrate_alert_state(conn: sqlite3.Connection) -> None:
+    """Add rise-side memory columns to DBs created before up alerts existed."""
+    cols = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(alert_state)").fetchall()
+    }
+    if not cols:
+        return
+    if "fired_up" not in cols:
+        conn.execute(
+            "ALTER TABLE alert_state ADD COLUMN fired_up INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_leg_up" not in cols:
+        conn.execute(
+            "ALTER TABLE alert_state ADD COLUMN last_leg_up INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _format_threshold(value: float) -> str:
@@ -376,31 +435,51 @@ def _row_to_config(row: sqlite3.Row) -> TickerConfig:
         usd = float(row["threshold_usd"])
         if not _is_positive(usd):
             usd = None
+    direction = "down"
+    if "direction" in keys and row["direction"]:
+        direction = _normalize_direction(str(row["direction"]))
     return TickerConfig(
         symbol=str(row["symbol"]),
         threshold_pct=float(row["threshold_pct"]),
         mode=_normalize_mode(str(row["mode"])),
         threshold_unit=unit,
         threshold_usd=usd,
+        direction=direction,
     )
 
 
 def _row_to_state(row: sqlite3.Row) -> AlertState:
+    keys = set(row.keys())
+    fired_up = bool(row["fired_up"]) if "fired_up" in keys else False
+    last_leg_up = int(row["last_leg_up"]) if "last_leg_up" in keys else 0
     return AlertState(
         day_key=str(row["day_key"]),
         fired=bool(row["fired"]),
         last_leg=int(row["last_leg"]),
+        fired_up=fired_up,
+        last_leg_up=last_leg_up,
     )
 
 
 def _upsert_state(conn: sqlite3.Connection, symbol: str, state: AlertState) -> None:
     conn.execute(
         """
-        INSERT INTO alert_state (symbol, day_key, fired, last_leg)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO alert_state (
+            symbol, day_key, fired, last_leg, fired_up, last_leg_up
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol, day_key) DO UPDATE SET
             fired = excluded.fired,
-            last_leg = excluded.last_leg
+            last_leg = excluded.last_leg,
+            fired_up = excluded.fired_up,
+            last_leg_up = excluded.last_leg_up
         """,
-        (symbol, state.day_key, 1 if state.fired else 0, int(state.last_leg)),
+        (
+            symbol,
+            state.day_key,
+            1 if state.fired else 0,
+            int(state.last_leg),
+            1 if state.fired_up else 0,
+            int(state.last_leg_up),
+        ),
     )
